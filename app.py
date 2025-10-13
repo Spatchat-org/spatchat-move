@@ -40,6 +40,7 @@ from dataset_context import build_dataset_context
 
 from estimators.locoh import compute_locoh, LoCoHParams
 from estimators.dbbmm import compute_dbbmm, DBBMMParams
+from estimators.kde import add_kdes, KDEParams  # NEW: import params-enabled KDE
 
 print("Starting SpatChat: Home Range Analysis (app.py) — handlers only")
 
@@ -84,6 +85,7 @@ def parse_kv_tokens(text: str) -> dict:
     Examples:
       "locoh k=10 a=1500 isopleths=50,95"
       "dbbmm 95 le=20 res=75 buf=1500 window=31 margin=11 subs=40"
+      "kde 95 bw=300m kernel=epanechnikov gres=50m"
     """
     toks = {}
     for m in re.finditer(r'([A-Za-z_]+)\s*=\s*([^\s]+)', text):
@@ -123,7 +125,6 @@ def _parse_levels_allow_100(text: str) -> list[int]:
     Extracts integers 1..100 (inclusive) from free text, preserving order and de-duplicating.
     Does NOT clamp 100 to 99 (unlike some existing helpers used for KDE).
     """
-    # match 100 or 0..99 with word boundaries; avoids catching years like 2020
     raw = re.findall(r'\b(100|[1-9]?[0-9])\b', text)
     out, seen = [], set()
     for tok in raw:
@@ -162,6 +163,17 @@ def _is_parameter_question(msg: str, keyword: str) -> bool:
         return False
     return ("param" in s) or ("option" in s) or ("argument" in s)
 
+# --- NEW: parse human distances like "300m", "0.5km", "1k" to meters ----------------
+def _parse_distance_to_meters(s: str) -> float:
+    s = s.strip().lower()
+    if s.endswith("km"):
+        return float(s[:-2]) * 1000.0
+    if s.endswith("k"):
+        return float(s[:-1]) * 1000.0
+    if s.endswith("m"):
+        return float(s[:-1])
+    return float(s)
+
 # --------------------------------------------------------------------------------------
 # Upload flow
 # --------------------------------------------------------------------------------------
@@ -188,7 +200,6 @@ def handle_upload_initial(file):
         set_cached_headers(list(df.columns))
     except Exception as e:
         print(f"[upload] failed to read CSV: {e}", file=sys.stderr)
-        # Outputs: [chatbot, x, y, crs, map, x, y, crs, confirm, download]
         return [
             [],  # chatbot messages
             gr.update(visible=False),  # x
@@ -224,7 +235,6 @@ def handle_upload_initial(file):
         lat_col = cached_headers[lower_cols.index("latitude")]
         lon_col = cached_headers[lower_cols.index("longitude")]
 
-        # If labeled as lat/lon but values look projected → ask for CRS
         if looks_invalid_latlon(get_cached_df(), lat_col, lon_col):
             return [
                 [{"role": "assistant", "content":
@@ -247,12 +257,10 @@ def handle_upload_initial(file):
         df0["longitude"] = df0[lon_col]
         df0["latitude"]  = df0[lat_col]
 
-        # Detect source ID/timestamp column names BEFORE standardizing
         from schema_detect import detect_id_column, detect_timestamp_column, ID_COL, TS_COL
         src_id = detect_id_column(df0)
         src_ts = detect_timestamp_column(df0)
 
-        # Standardize to animal_id / timestamp
         df1, meta_msgs = detect_and_standardize(df0)
         set_cached_df(df1)
 
@@ -301,12 +309,10 @@ def handle_upload_initial(file):
         df0["longitude"] = df0[found_x] if latlon_guess == "lonlat" else df0[found_y]
         df0["latitude"]  = df0[found_y] if latlon_guess == "lonlat" else df0[found_x]
 
-        # Detect source ID/timestamp BEFORE standardizing
         from schema_detect import detect_id_column, detect_timestamp_column, ID_COL, TS_COL
         src_id = detect_id_column(df0)
         src_ts = detect_timestamp_column(df0)
 
-        # Standardize to canonical names
         df1, meta_msgs = detect_and_standardize(df0)
         set_cached_df(df1)
 
@@ -475,7 +481,7 @@ def handle_chat(chat_history, user_message):
         chat_history.append({"role": "assistant", "content": msg + (" " + " ".join(follow) if follow else "")})
         return chat_history, gr.update(), gr.update(visible=False)
 
-    # --- NEW: Parameter Q&A short-circuit (prevents accidentally running old results)
+    # --- Parameter Q&A short-circuit (prevents accidentally running old results)
     if _is_parameter_question(user_message, "dbbmm"):
         chat_history.append({
             "role": "assistant",
@@ -506,21 +512,19 @@ def handle_chat(chat_history, user_message):
     locoh_params = None
     dbbmm_list = []
     dbbmm_params = None
+    kde_params = KDEParams()  # NEW: default KDE params object
 
     # Tool intent → fill lists (extensible)
     warned_about_kde_100 = False
     if tool and tool.get("tool") == "home_range":
         method = tool.get("method")
         raw_levels = tool.get("levels", [95])
-        # Valid 1..100
         levels = [int(p) for p in raw_levels if 1 <= int(p) <= 100]
 
         if method == "mcp":
-            # allow 100% for MCP
             mcp_list = levels
 
         elif method == "kde":
-            # clamp KDE to 99%, warn if 100 was requested
             if 100 in levels:
                 warned_about_kde_100 = True
             kde_list = [min(p, 99) for p in levels]
@@ -539,11 +543,37 @@ def handle_chat(chat_history, user_message):
     # Fallback: keyword parse
     msg_lower = user_message.lower()
     if "mcp" in msg_lower:
-        # IMPORTANT: use permissive parser here (allows 100)
         parsed = _parse_levels_allow_100(user_message)
         mcp_list = parsed or [95]
+
+    # --- NEW: KDE keyword parsing with meters/km bandwidth + kernel + grid res -------
     if "kde" in msg_lower:
-        kde_list = parse_levels_from_text(user_message)  # keep existing (likely clamps ≤99)
+        kde_list = parse_levels_from_text(user_message)  # existing (we clamp later)
+
+        toks = parse_kv_tokens(user_message)
+        bw_m = None
+        if "bw" in toks or "bandwidth" in toks or "h" in toks:
+            v = toks.get("bw", toks.get("bandwidth", toks.get("h")))
+            try:
+                bw_m = _parse_distance_to_meters(v)
+            except Exception:
+                bw_m = None
+
+        kernel = toks.get("kernel", "gaussian").lower()
+        gres_m = None
+        if "gres" in toks or "grid_res" in toks:
+            v = toks.get("gres", toks.get("grid_res"))
+            try:
+                gres_m = _parse_distance_to_meters(v)
+            except Exception:
+                gres_m = None
+
+        kde_params = KDEParams(
+            bandwidth_m=bw_m,
+            kernel=kernel,
+            grid_res_m=gres_m,
+            grid_size=200
+        )
 
     # LoCoH keywords (supports k/a/r + isopleths)
     if "locoh" in msg_lower:
@@ -573,7 +603,7 @@ def handle_chat(chat_history, user_message):
             iso = tuple(parsed) if parsed else (95,)
         locoh_params = LoCoHParams(method=method, k=k, a=a, r=r, isopleths=iso)
 
-    # --- NEW: dBBMM keywords (only arm if levels, key=vals, or action verb given)
+    # dBBMM keywords (only arm if user gave levels, key=vals, or an action verb)
     if "dbbmm" in msg_lower:
         looks_like_levels = bool(re.search(r"\b(100|[1-9]?[0-9])\b", user_message))
         looks_like_kv     = "=" in user_message
@@ -637,14 +667,12 @@ def handle_chat(chat_history, user_message):
     # Must have lon/lat prepared
     df = get_cached_df()
     if df is None or "latitude" not in df or "longitude" not in df:
-        # --- NEW: ensure no previous-session layers leak in the map
-        clear_all_results()
+        clear_all_results()  # ensures no previous-session layers leak in the map
         chat_history.append({"role": "assistant", "content": "Please upload a CSV first (with latitude/longitude)."})
         return chat_history, gr.update(), gr.update(visible=False)
 
     results_exist = False
     # KDE 100% → clamp to 99% and warn (keyword path)
-    warned_about_kde_100 = warned_about_kde_100  # keep variable defined
     if kde_list:
         if 100 in kde_list or any("100" in s for s in user_message.split()):
             warned_about_kde_100 = True
@@ -659,13 +687,13 @@ def handle_chat(chat_history, user_message):
     # -------------------------
     if mcp_list:
         from estimators.mcp import add_mcps
-        add_mcps(df, mcp_list)  # <-- now respects 100
+        add_mcps(df, mcp_list)  # respects 100
         requested_percents.update(mcp_list)
         results_exist = True
 
     if kde_list:
-        from estimators.kde import add_kdes
-        add_kdes(df, kde_list)
+        # NEW: pass KDEParams (bandwidth in meters, kernel, optional grid res)
+        add_kdes(df, kde_list, params=kde_params)
         requested_kde_percents.update(kde_list)
         results_exist = True
 
