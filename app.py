@@ -133,6 +133,35 @@ def _parse_levels_allow_100(text: str) -> list[int]:
             out.append(p)
     return out
 
+# --- NEW: clear any stale state when the app starts ---------------------------------
+def _reset_session_state():
+    try:
+        clear_all_results()
+    except Exception:
+        pass
+    try:
+        set_cached_df(None)
+    except Exception:
+        pass
+    try:
+        set_cached_headers([])
+    except Exception:
+        pass
+
+# --- NEW: detect "parameter question" (no levels, no key=val, no action verb) -------
+_PARAM_VERBS = ("run", "compute", "calculate", "do", "make", "generate", "plot", "draw", "want")
+def _is_parameter_question(msg: str, keyword: str) -> bool:
+    s = msg.lower()
+    if keyword not in s:
+        return False
+    if any(v in s for v in _PARAM_VERBS):
+        return False
+    if re.search(r"\b(100|[1-9]?[0-9])\b", s):  # looks like an isopleth level
+        return False
+    if "=" in s:  # looks like key=value params
+        return False
+    return ("param" in s) or ("option" in s) or ("argument" in s)
+
 # --------------------------------------------------------------------------------------
 # Upload flow
 # --------------------------------------------------------------------------------------
@@ -446,6 +475,24 @@ def handle_chat(chat_history, user_message):
         chat_history.append({"role": "assistant", "content": msg + (" " + " ".join(follow) if follow else "")})
         return chat_history, gr.update(), gr.update(visible=False)
 
+    # --- NEW: Parameter Q&A short-circuit (prevents accidentally running old results)
+    if _is_parameter_question(user_message, "dbbmm"):
+        chat_history.append({
+            "role": "assistant",
+            "content": (
+                "dBBMM parameters you can set:\n"
+                "• **le / locerr / sigma** (meters): GPS location error (default 30)\n"
+                "• **window / w** (integer): sliding window size (default 31)\n"
+                "• **margin / m** (integer): points trimmed at each end (default 11)\n"
+                "• **res / resolution** (meters): raster cell size (default 50)\n"
+                "• **buf / buffer** (meters): buffer around track for raster extent (default 1000)\n"
+                "• **subs / substeps** (integer): interpolation substeps between fixes (default 40)\n"
+                "• **isopleths**: UD contours to export, e.g. 50,95 (default 95)\n\n"
+                "Example: `dbbmm 95 le=20 res=75 buf=1500 window=31 margin=11 subs=40`"
+            )
+        })
+        return chat_history, gr.update(), gr.update(visible=False)
+
     # Normal tool-intent call (with dataset context)
     context_raw = _current_dataset_context()
     context_safe = _json_safe(context_raw)
@@ -526,38 +573,42 @@ def handle_chat(chat_history, user_message):
             iso = tuple(parsed) if parsed else (95,)
         locoh_params = LoCoHParams(method=method, k=k, a=a, r=r, isopleths=iso)
 
-    # dBBMM keywords
+    # --- NEW: dBBMM keywords (only arm if levels, key=vals, or action verb given)
     if "dbbmm" in msg_lower:
-        dbbmm_list = _parse_levels_allow_100(user_message) or [95]
-        toks = parse_kv_tokens(user_message)
+        looks_like_levels = bool(re.search(r"\b(100|[1-9]?[0-9])\b", user_message))
+        looks_like_kv     = "=" in user_message
+        looks_actiony     = any(v in msg_lower for v in _PARAM_VERBS)
+        if looks_like_levels or looks_like_kv or looks_actiony:
+            dbbmm_list = _parse_levels_allow_100(user_message) or [95]
+            toks = parse_kv_tokens(user_message)
 
-        def _get_float(keys, default):
-            for k in keys:
-                if k in toks:
-                    try:
-                        return float(toks[k])
-                    except Exception:
-                        pass
-            return float(default)
+            def _get_float(keys, default):
+                for k in keys:
+                    if k in toks:
+                        try:
+                            return float(toks[k])
+                        except Exception:
+                            pass
+                return float(default)
 
-        def _get_int(keys, default):
-            for k in keys:
-                if k in toks:
-                    try:
-                        return int(toks[k])
-                    except Exception:
-                        pass
-            return int(default)
+            def _get_int(keys, default):
+                for k in keys:
+                    if k in toks:
+                        try:
+                            return int(toks[k])
+                        except Exception:
+                            pass
+                return int(default)
 
-        dbbmm_params = DBBMMParams(
-            location_error_m=_get_float(["le", "locerr", "sigma"], 30.0),
-            window_size=_get_int(["window", "w"], 31),
-            margin=_get_int(["margin", "m"], 11),
-            raster_resolution_m=_get_float(["res", "resolution"], 50.0),
-            buffer_m=_get_float(["buf", "buffer"], 1000.0),
-            n_substeps=_get_int(["subs", "substeps"], 40),
-            isopleths=tuple(dbbmm_list),
-        )
+            dbbmm_params = DBBMMParams(
+                location_error_m=_get_float(["le", "locerr", "sigma"], 30.0),
+                window_size=_get_int(["window", "w"], 31),
+                margin=_get_int(["margin", "m"], 11),
+                raster_resolution_m=_get_float(["res", "resolution"], 50.0),
+                buffer_m=_get_float(["buf", "buffer"], 1000.0),
+                n_substeps=_get_int(["subs", "substeps"], 40),
+                isopleths=tuple(dbbmm_list),
+            )
 
     # If not an analysis request, reply naturally (short)
     if not mcp_list and not kde_list and not locoh_requested and not dbbmm_list:
@@ -586,11 +637,14 @@ def handle_chat(chat_history, user_message):
     # Must have lon/lat prepared
     df = get_cached_df()
     if df is None or "latitude" not in df or "longitude" not in df:
-        chat_history.append({"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."})
+        # --- NEW: ensure no previous-session layers leak in the map
+        clear_all_results()
+        chat_history.append({"role": "assistant", "content": "Please upload a CSV first (with latitude/longitude)."})
         return chat_history, gr.update(), gr.update(visible=False)
 
     results_exist = False
     # KDE 100% → clamp to 99% and warn (keyword path)
+    warned_about_kde_100 = warned_about_kde_100  # keep variable defined
     if kde_list:
         if 100 in kde_list or any("100" in s for s in user_message.split()):
             warned_about_kde_100 = True
@@ -691,6 +745,8 @@ def handle_chat(chat_history, user_message):
 # --------------------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------------------
+_reset_session_state()  # NEW: clear stale state at app start
+
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
         value="logo_long1.png",
