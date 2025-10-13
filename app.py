@@ -40,7 +40,7 @@ from dataset_context import build_dataset_context
 
 from estimators.locoh import compute_locoh, LoCoHParams
 from estimators.dbbmm import compute_dbbmm, DBBMMParams
-from estimators.kde import add_kdes, KDEParams  # NEW: import params-enabled KDE
+from estimators.kde import add_kdes, KDEParams  # params-enabled KDE
 
 print("Starting SpatChat: Home Range Analysis (app.py) — handlers only")
 
@@ -104,7 +104,7 @@ def _summarize_locoh(res: dict, params: LoCoHParams) -> str:
             lines.append(f"- {animal_id}: " + ", ".join(parts))
     return "\n".join(lines) if got else "LoCoH finished, but no polygons were built."
 
-# Track per-upload “pending questions” we may ask the user (id/timestamp)
+# Track per-upload “pending questions”
 PENDING_QUESTIONS = {
     "need_id": False,
     "need_ts": False,
@@ -119,12 +119,8 @@ def _current_dataset_context():
     except Exception:
         return {"empty": True}
 
-# --- NEW: permissive level parser for MCP (allows 100) ------------------------------
+# --- permissive level parser for MCP (allows 100) -----------------------------------
 def _parse_levels_allow_100(text: str) -> list[int]:
-    """
-    Extracts integers 1..100 (inclusive) from free text, preserving order and de-duplicating.
-    Does NOT clamp 100 to 99 (unlike some existing helpers used for KDE).
-    """
     raw = re.findall(r'\b(100|[1-9]?[0-9])\b', text)
     out, seen = [], set()
     for tok in raw:
@@ -134,7 +130,7 @@ def _parse_levels_allow_100(text: str) -> list[int]:
             out.append(p)
     return out
 
-# --- NEW: clear any stale state when the app starts ---------------------------------
+# --- clear any stale state at app start ---------------------------------------------
 def _reset_session_state():
     try:
         clear_all_results()
@@ -149,7 +145,7 @@ def _reset_session_state():
     except Exception:
         pass
 
-# --- NEW: detect "parameter question" (no levels, no key=val, no action verb) -------
+# --- detect "parameter question" (no levels, no key=val, no action verb) ------------
 _PARAM_VERBS = ("run", "compute", "calculate", "do", "make", "generate", "plot", "draw", "want")
 def _is_parameter_question(msg: str, keyword: str) -> bool:
     s = msg.lower()
@@ -157,13 +153,21 @@ def _is_parameter_question(msg: str, keyword: str) -> bool:
         return False
     if any(v in s for v in _PARAM_VERBS):
         return False
-    if re.search(r"\b(100|[1-9]?[0-9])\b", s):  # looks like an isopleth level
+    if re.search(r"\b(100|[1-9]?[0-9])\b", s):
         return False
-    if "=" in s:  # looks like key=value params
+    if "=" in s:
         return False
     return ("param" in s) or ("option" in s) or ("argument" in s)
 
-# --- NEW: parse human distances like "300m", "0.5km", "1k" to meters ----------------
+# --- NEW: generic "parameters?" / "options?" overview detector -----------------------
+def _wants_parameters_overview(msg: str) -> bool:
+    s = msg.lower().strip()
+    if any(v in s for v in _PARAM_VERBS):
+        return False
+    # generic ask without an estimator keyword
+    return any(w in s for w in ("param", "option", "argument", "how to set", "available settings"))
+
+# --- parse human distances like "300m", "0.5km", "1k" to meters ---------------------
 def _parse_distance_to_meters(s: str) -> float:
     s = s.strip().lower()
     if s.endswith("km"):
@@ -174,20 +178,57 @@ def _parse_distance_to_meters(s: str) -> float:
         return float(s[:-1])
     return float(s)
 
+# --- NEW: one source of truth for parameter help ------------------------------------
+def _parameters_markdown(which: str | None = None) -> str:
+    mcp = (
+        "**MCP (Minimum Convex Polygon)**\n"
+        "• `isopleths`: UD contours to export (e.g., 50,95). Example: `mcp 50,95`\n"
+    )
+    kde = (
+        "**KDE (Kernel Density Estimation)**\n"
+        "• `isopleths`: UD contours to export (e.g., 50,95). Example: `kde 95`\n"
+        "• `bw` / `bandwidth` / `h` **(meters or km)**: kernel bandwidth in UTM meters. "
+        "Examples: `bw=300m`, `bw=0.5km` (500 m)\n"
+        "• `kernel`: one of `gaussian`, `epanechnikov`, `tophat`, `exponential`, `linear`, `cosine`. "
+        "Example: `kernel=epanechnikov`\n"
+        "• `gres` / `grid_res` **(meters or km)**: grid cell size for the raster (optional). Example: `gres=50m`\n"
+        "Examples: `kde 95 bw=300m kernel=epanechnikov`,  `kde 50,95 bw=0.5km`\n"
+    )
+    locoh = (
+        "**LoCoH (Local Convex Hull)**\n"
+        "• `method`: `k` (neighbors), `a` (radius), or `r` (adaptive)\n"
+        "• `k` (int): number of nearest neighbors (for method=`k`). Default 10\n"
+        "• `a` (float): distance threshold in meters (for method=`a`)\n"
+        "• `r` (float): adaptive radius in meters (for method=`r`)\n"
+        "• `isopleths`: UD contours (e.g., 50,95). Examples: `locoh k=10 isopleths=50,95`, `locoh a=1500 95`\n"
+    )
+    dbbmm = (
+        "**dBBMM (Distance-based Brownian Bridge)**\n"
+        "• `le`/`locerr`/`sigma` (m): GPS location error. Default 30\n"
+        "• `window`/`w` (int): sliding window size. Default 31\n"
+        "• `margin`/`m` (int): points trimmed at each end. Default 11\n"
+        "• `res`/`resolution` (m): raster cell size. Default 50\n"
+        "• `buf`/`buffer` (m): buffer around track. Default 1000\n"
+        "• `subs`/`substeps` (int): interpolation substeps. Default 40\n"
+        "• `isopleths`: UD contours (e.g., 50,95). Example: `dbbmm 95 res=75 buf=1500`\n"
+    )
+    all_text = (
+        "Here are the parameter options:\n\n" + mcp + "\n" + kde + "\n" + locoh + "\n" + dbbmm
+        + "\nTip: bare numbers for `bw`, `gres`, etc. are treated as meters; add `km` to use kilometers."
+    )
+    if which is None:
+        return all_text
+    which = which.lower()
+    if which == "mcp": return mcp
+    if which == "kde": return kde
+    if which == "locoh": return locoh
+    if which == "dbbmm": return dbbmm
+    return all_text
+
 # --------------------------------------------------------------------------------------
 # Upload flow
 # --------------------------------------------------------------------------------------
 def handle_upload_initial(file):
-    """
-    1) Cache uploaded CSV
-    2) Try to auto-detect lat/lon columns
-    3) If ambiguous or projected, show pickers and CRS input
-    4) Also detect animal_id / timestamp and report to the user
-
-    Returns (for your existing UI wiring):
-      [chatbot, x_col, y_col, crs_text, map_output,
-       x_col, y_col, crs_text, confirm_btn, download_btn]
-    """
     clear_all_results()
 
     os.makedirs("uploads", exist_ok=True)
@@ -213,14 +254,14 @@ def handle_upload_initial(file):
             gr.update(visible=False),  # download
         ]
 
-    # Reset pending questions flags for this dataset
+    # Reset pending flags
     for k in PENDING_QUESTIONS:
         PENDING_QUESTIONS[k] = False
 
     cached_headers = get_cached_headers()
     lower_cols = [c.lower() for c in cached_headers]
 
-    # ---------- detect heuristic lon/lat candidates ----------
+    # heuristic lon/lat candidates
     found_x = found_y = None
     latlon_guess = None
     try:
@@ -230,7 +271,7 @@ def handle_upload_initial(file):
     except Exception:
         pass
 
-    # ---------- Branch A: explicit latitude/longitude column names ----------
+    # A) explicit latitude/longitude
     if "latitude" in lower_cols and "longitude" in lower_cols:
         lat_col = cached_headers[lower_cols.index("latitude")]
         lon_col = cached_headers[lower_cols.index("longitude")]
@@ -241,18 +282,17 @@ def handle_upload_initial(file):
                   "CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
                   "Please specify X (easting), Y (northing), and the CRS/UTM zone below "
                   "(e.g., 'UTM 10T' or 'EPSG:32610')."}],
-                gr.update(choices=cached_headers, value=lon_col, visible=True),  # x
-                gr.update(choices=cached_headers, value=lat_col, visible=True),  # y
-                gr.update(visible=True),                                         # crs
-                render_empty_map(),                                              # map
-                gr.update(visible=True),                                         # x (dup)
-                gr.update(visible=True),                                         # y (dup)
-                gr.update(visible=True),                                         # crs (dup)
-                gr.update(visible=True),                                         # confirm
-                gr.update(visible=False),                                        # download
+                gr.update(choices=cached_headers, value=lon_col, visible=True),
+                gr.update(choices=cached_headers, value=lat_col, visible=True),
+                gr.update(visible=True),
+                render_empty_map(),
+                gr.update(visible=True),
+                gr.update(visible=True),
+                gr.update(visible=True),
+                gr.update(visible=True),
+                gr.update(visible=False),
             ]
 
-        # Looks valid; standardize ID/timestamp too, then render map immediately
         df0 = get_cached_df().copy()
         df0["longitude"] = df0[lon_col]
         df0["latitude"]  = df0[lat_col]
@@ -261,9 +301,8 @@ def handle_upload_initial(file):
         src_id = detect_id_column(df0)
         src_ts = detect_timestamp_column(df0)
 
-        df1, meta_msgs = detect_and_standardize(df0)
+        df1, _ = detect_and_standardize(df0)
         set_cached_df(df1)
-
         map_html = build_preview_map(df1)
 
         id_found  = (ID_COL in df1.columns)
@@ -291,18 +330,18 @@ def handle_upload_initial(file):
 
         return [
             [{"role": "assistant", "content": msg}],
-            gr.update(visible=False),  # x
-            gr.update(visible=False),  # y
-            gr.update(visible=False),  # crs
-            map_html,                  # map
-            gr.update(visible=False),  # x (dup)
-            gr.update(visible=False),  # y (dup)
-            gr.update(visible=False),  # crs (dup)
-            gr.update(visible=False),  # confirm
-            gr.update(visible=False),  # download
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            map_html,
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
         ]
 
-    # ---------- Branch B: heuristic lat/lon guess ----------
+    # B) heuristic lon/lat guess
     if latlon_guess:
         df = get_cached_df()
         df0 = df.copy()
@@ -313,9 +352,8 @@ def handle_upload_initial(file):
         src_id = detect_id_column(df0)
         src_ts = detect_timestamp_column(df0)
 
-        df1, meta_msgs = detect_and_standardize(df0)
+        df1, _ = detect_and_standardize(df0)
         set_cached_df(df1)
-
         map_html = build_preview_map(df1)
 
         id_found = (ID_COL in df1.columns)
@@ -343,40 +381,35 @@ def handle_upload_initial(file):
 
         return [
             [{"role": "assistant", "content": msg}],
-            gr.update(visible=False),  # x
-            gr.update(visible=False),  # y
-            gr.update(visible=False),  # crs
-            map_html,                  # map
-            gr.update(visible=False),  # x (dup)
-            gr.update(visible=False),  # y (dup)
-            gr.update(visible=False),  # crs (dup)
-            gr.update(visible=False),  # confirm
-            gr.update(visible=False),  # download
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            map_html,
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
         ]
 
-    # ---------- Branch C: need user to pick X/Y and provide CRS ----------
+    # C) need user to pick X/Y and CRS
     return [
         [{"role": "assistant", "content":
           "CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
           "Please specify X (easting), Y (northing), and the CRS/UTM zone below."}],
-        gr.update(choices=cached_headers, value=found_x, visible=True),  # x
-        gr.update(choices=cached_headers, value=found_y, visible=True),  # y
-        gr.update(visible=True),                                         # crs
-        render_empty_map(),                                              # map
-        gr.update(visible=True),                                         # x (dup)
-        gr.update(visible=True),                                         # y (dup)
-        gr.update(visible=True),                                         # crs (dup)
-        gr.update(visible=True),                                         # confirm
-        gr.update(visible=False),                                        # download
+        gr.update(choices=cached_headers, value=found_x, visible=True),
+        gr.update(choices=cached_headers, value=found_y, visible=True),
+        gr.update(visible=True),
+        render_empty_map(),
+        gr.update(visible=True),
+        gr.update(visible=True),
+        gr.update(visible=True),
+        gr.update(visible=True),
+        gr.update(visible=False),
     ]
 
 
 def handle_upload_confirm(x_col, y_col, crs_text):
-    """
-    Confirm coordinate columns and (if required) reproject to WGS84.
-    Also runs schema detection for animal_id/timestamp and returns preview map HTML.
-    (Single-output function; the wrapper confirm_and_hint adds a chat line.)
-    """
     df = get_cached_df()
     if df is None:
         return "<p>No data loaded. Please upload a CSV first.</p>"
@@ -385,7 +418,6 @@ def handle_upload_confirm(x_col, y_col, crs_text):
     if x_col not in df.columns or y_col not in df.columns:
         return "<p>Selected coordinate columns not found in data.</p>"
 
-    # If already lon/lat columns by name, validate; if invalid ranges → require CRS
     if x_col.lower() in ["longitude", "lon"] and y_col.lower() in ["latitude", "lat"]:
         try:
             lon_ok = df[x_col].astype(float).between(-180, 180).all()
@@ -408,7 +440,6 @@ def handle_upload_confirm(x_col, y_col, crs_text):
                 return f"<p>Failed to convert coordinates: {e}</p>"
 
     else:
-        # Generic X/Y → need CRS to convert
         if not str(crs_text).strip():
             return "<p>Please enter a CRS or UTM zone before confirming (e.g., 'UTM 10T' or 'EPSG:32610').</p>"
         try:
@@ -419,20 +450,12 @@ def handle_upload_confirm(x_col, y_col, crs_text):
         except Exception as e:
             return f"<p>Failed to convert coordinates: {e}</p>"
 
-    # Detect & standardize metadata columns (animal_id/timestamp)
     df, _ = detect_and_standardize(df)
     set_cached_df(df)
-
     return build_preview_map(df)
 
 def confirm_and_hint(x_col, y_col, crs_text, chat_history):
-    """
-    Wrapper: returns (map_html, updated_chat_history)
-    Used when user had to pick X/Y & CRS before plotting.
-    """
     map_html = handle_upload_confirm(x_col, y_col, crs_text)
-
-    # If handle_upload_confirm returned an error snippet, we still add guidance.
     guidance = _home_range_help()
     chat = list(chat_history)
     chat.append({"role": "assistant", "content": guidance})
@@ -443,17 +466,11 @@ def confirm_and_hint(x_col, y_col, crs_text, chat_history):
 # --------------------------------------------------------------------------------------
 def handle_chat(chat_history, user_message):
     """
-    Handles user chat. If a home range request is detected (via LLM tool or keywords),
-    run MCP/KDE/LoCoH/dBBMM and refresh the map. Otherwise answer briefly (via llm_utils.ask_llm).
-    Also processes user commands like:
-      - "timestamp column is <name>"
-      - "id column is <name>"
-      - "no timestamp"
-      - "no id"
+    Handles user chat. Detects estimator requests or parameter questions.
     """
     chat_history = list(chat_history)
 
-    # If user is supplying metadata mapping (timestamp/id), apply it first
+    # Mapping commands (id/timestamp)
     cmd = parse_metadata_command(user_message)
     if cmd:
         df = get_cached_df()
@@ -464,7 +481,6 @@ def handle_chat(chat_history, user_message):
         df2, msg = try_apply_user_mapping(df, cmd)
         set_cached_df(df2)
 
-        # Update pending questions flags based on result
         PENDING_QUESTIONS["need_id"] = (ID_COL not in df2.columns)
         PENDING_QUESTIONS["need_ts"] = (TS_COL not in df2.columns)
 
@@ -481,22 +497,28 @@ def handle_chat(chat_history, user_message):
         chat_history.append({"role": "assistant", "content": msg + (" " + " ".join(follow) if follow else "")})
         return chat_history, gr.update(), gr.update(visible=False)
 
-    # --- Parameter Q&A short-circuit (prevents accidentally running old results)
+    # --- NEW: Generic "parameters?" overview (before LLM!) ---------------------------
+    if _wants_parameters_overview(user_message):
+        chat_history.append({"role": "assistant", "content": _parameters_markdown(None)})
+        return chat_history, gr.update(), gr.update(visible=False)
+
+    # --- NEW: Estimator-specific parameter asks (no action verbs) --------------------
+    if _is_parameter_question(user_message, "mcp"):
+        chat_history.append({"role": "assistant", "content": _parameters_markdown("mcp")})
+        return chat_history, gr.update(), gr.update(visible=False)
+    if _is_parameter_question(user_message, "kde"):
+        chat_history.append({"role": "assistant", "content": _parameters_markdown("kde")})
+        return chat_history, gr.update(), gr.update(visible=False)
+    if _is_parameter_question(user_message, "locoh"):
+        chat_history.append({"role": "assistant", "content": _parameters_markdown("locoh")})
+        return chat_history, gr.update(), gr.update(visible=False)
     if _is_parameter_question(user_message, "dbbmm"):
-        chat_history.append({
-            "role": "assistant",
-            "content": (
-                "dBBMM parameters you can set:\n"
-                "• **le / locerr / sigma** (meters): GPS location error (default 30)\n"
-                "• **window / w** (integer): sliding window size (default 31)\n"
-                "• **margin / m** (integer): points trimmed at each end (default 11)\n"
-                "• **res / resolution** (meters): raster cell size (default 50)\n"
-                "• **buf / buffer** (meters): buffer around track for raster extent (default 1000)\n"
-                "• **subs / substeps** (integer): interpolation substeps between fixes (default 40)\n"
-                "• **isopleths**: UD contours to export, e.g. 50,95 (default 95)\n\n"
-                "Example: `dbbmm 95 le=20 res=75 buf=1500 window=31 margin=11 subs=40`"
-            )
-        })
+        chat_history.append({"role": "assistant", "content": _parameters_markdown("dbbmm")})
+        return chat_history, gr.update(), gr.update(visible=False)
+
+    # --- Previously added: dBBMM parameter Q&A also stays (redundant but harmless) ---
+    if _is_parameter_question(user_message, "dbbmm"):
+        chat_history.append({"role": "assistant", "content": _parameters_markdown("dbbmm")})
         return chat_history, gr.update(), gr.update(visible=False)
 
     # Normal tool-intent call (with dataset context)
@@ -512,9 +534,8 @@ def handle_chat(chat_history, user_message):
     locoh_params = None
     dbbmm_list = []
     dbbmm_params = None
-    kde_params = KDEParams()  # NEW: default KDE params object
+    kde_params = KDEParams()
 
-    # Tool intent → fill lists (extensible)
     warned_about_kde_100 = False
     if tool and tool.get("tool") == "home_range":
         method = tool.get("method")
@@ -546,9 +567,9 @@ def handle_chat(chat_history, user_message):
         parsed = _parse_levels_allow_100(user_message)
         mcp_list = parsed or [95]
 
-    # --- NEW: KDE keyword parsing with meters/km bandwidth + kernel + grid res -------
+    # KDE with meters/km bandwidth + kernel + grid res
     if "kde" in msg_lower:
-        kde_list = parse_levels_from_text(user_message)  # existing (we clamp later)
+        kde_list = parse_levels_from_text(user_message)  # existing (clamped later)
 
         toks = parse_kv_tokens(user_message)
         bw_m = None
@@ -575,7 +596,7 @@ def handle_chat(chat_history, user_message):
             grid_size=200
         )
 
-    # LoCoH keywords (supports k/a/r + isopleths)
+    # LoCoH keywords
     if "locoh" in msg_lower:
         locoh_requested = True
         toks = parse_kv_tokens(user_message)
@@ -603,7 +624,7 @@ def handle_chat(chat_history, user_message):
             iso = tuple(parsed) if parsed else (95,)
         locoh_params = LoCoHParams(method=method, k=k, a=a, r=r, isopleths=iso)
 
-    # dBBMM keywords (only arm if user gave levels, key=vals, or an action verb)
+    # dBBMM keywords (only arm if user gave levels, key=vals, or action verb)
     if "dbbmm" in msg_lower:
         looks_like_levels = bool(re.search(r"\b(100|[1-9]?[0-9])\b", user_message))
         looks_like_kv     = "=" in user_message
@@ -640,7 +661,7 @@ def handle_chat(chat_history, user_message):
                 isopleths=tuple(dbbmm_list),
             )
 
-    # If not an analysis request, reply naturally (short)
+    # If not an analysis request, answer naturally
     if not mcp_list and not kde_list and not locoh_requested and not dbbmm_list:
         if PENDING_QUESTIONS["need_id"] and not PENDING_QUESTIONS["id_prompted"]:
             chat_history.append({"role": "assistant", "content":
@@ -667,12 +688,11 @@ def handle_chat(chat_history, user_message):
     # Must have lon/lat prepared
     df = get_cached_df()
     if df is None or "latitude" not in df or "longitude" not in df:
-        clear_all_results()  # ensures no previous-session layers leak in the map
+        clear_all_results()
         chat_history.append({"role": "assistant", "content": "Please upload a CSV first (with latitude/longitude)."})
         return chat_history, gr.update(), gr.update(visible=False)
 
     results_exist = False
-    # KDE 100% → clamp to 99% and warn (keyword path)
     if kde_list:
         if 100 in kde_list or any("100" in s for s in user_message.split()):
             warned_about_kde_100 = True
@@ -682,17 +702,14 @@ def handle_chat(chat_history, user_message):
     locoh_error = None
     dbbmm_result = None
 
-    # -------------------------
     # Run analyses
-    # -------------------------
     if mcp_list:
         from estimators.mcp import add_mcps
-        add_mcps(df, mcp_list)  # respects 100
+        add_mcps(df, mcp_list)
         requested_percents.update(mcp_list)
         results_exist = True
 
     if kde_list:
-        # NEW: pass KDEParams (bandwidth in meters, kernel, optional grid res)
         add_kdes(df, kde_list, params=kde_params)
         requested_kde_percents.update(kde_list)
         results_exist = True
@@ -730,12 +747,10 @@ def handle_chat(chat_history, user_message):
             results_exist = True
         except Exception as e:
             chat_history.append({"role": "assistant", "content": f"dBBMM error: {e}"})
-            
-    # Use persisted results if this turn did not produce new ones
+
     effective_locoh  = locoh_result  if locoh_result  is not None else get_locoh_results()
     effective_dbbmm  = dbbmm_result  if dbbmm_result  is not None else get_dbbmm_results()
 
-    # Build map (points/tracks + estimators)
     map_html = build_results_map(
         df,
         mcp_results=mcp_results,
@@ -746,21 +761,19 @@ def handle_chat(chat_history, user_message):
         dbbmm_result=effective_dbbmm
     )
 
-    # Compose assistant message & ZIP
     msgs = []
     if requested_percents:
         msgs.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(requested_percents))}%) calculated.")
     if requested_kde_percents:
         msgs.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(requested_kde_percents))}%) calculated (raster & contours).")
     if warned_about_kde_100:
-        msgs.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
+        msgs.append("Note: KDE at 100% is not supported and has been replaced by 99%.")
     if locoh_result:
         msgs.append(_summarize_locoh(locoh_result, locoh_params or LoCoHParams()))
     if locoh_error:
         msgs.append(f"LoCoH error: {locoh_error}")
     if dbbmm_list:
         msgs.append(f"dBBMM UDs computed ({', '.join(str(p) for p in sorted(set(dbbmm_list))) }% isopleths). Raster + contours added.")
-
     if results_exist:
         msgs.append("_The download button is below the preview map._")
 
@@ -773,7 +786,7 @@ def handle_chat(chat_history, user_message):
 # --------------------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------------------
-_reset_session_state()  # NEW: clear stale state at app start
+_reset_session_state()
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
@@ -844,10 +857,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                 visible=False
             )
 
-    # Queue (unchanged)
     demo.queue(max_size=16)
 
-    # Wire events (same outputs ordering)
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
@@ -868,5 +879,4 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     )
     user_input.submit(lambda *args: "", inputs=None, outputs=user_input)
 
-# HF Spaces-friendly launch
 demo.launch(ssr_mode=False)
