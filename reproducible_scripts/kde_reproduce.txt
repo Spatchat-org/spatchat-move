@@ -1,0 +1,256 @@
+# Standalone reproducibility script for SpatChat KDE outputs
+# Install requirements first:
+#   pip install pandas numpy rasterio shapely pyproj scikit-image scikit-learn
+# Rename this file to .py if you want to run it directly.
+#
+# USER ARGUMENTS:
+# - INPUT_CSV: by default uses bundled input_data.csv in this folder.
+# - OUTPUT_DIR: where reproduced outputs will be written.
+# - PERCENTS: KDE levels to reproduce. By default these come from repro_config.json.
+# - PARAMS: optional KDE settings. By default these also come from repro_config.json.
+
+import json
+import os
+import zipfile
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import rasterio
+from pyproj import Transformer
+from rasterio.transform import from_origin
+from shapely.geometry import MultiPolygon, Polygon, mapping
+from shapely.ops import unary_union
+from skimage import measure
+from sklearn.neighbors import KernelDensity
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+INPUT_CSV = os.path.join(SCRIPT_DIR, "input_data.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs")
+
+CONFIG = {}
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        CONFIG = json.load(f)
+
+PERCENTS = [int(x) for x in CONFIG.get("kde", {}).get("percents", [95])]
+
+
+@dataclass
+class KDEParams:
+    bandwidth_m: Optional[float] = None
+    kernel: str = "gaussian"
+    grid_res_m: Optional[float] = None
+    grid_size: int = 200
+    extent_buffer_mult: float = 3.0
+
+
+PARAMS_RAW = CONFIG.get("kde", {}).get("params", {}) or {}
+PARAMS = KDEParams(
+    bandwidth_m=float(PARAMS_RAW["bandwidth_m"]) if PARAMS_RAW.get("bandwidth_m") is not None else None,
+    kernel=str(PARAMS_RAW.get("kernel", "gaussian")),
+    grid_res_m=float(PARAMS_RAW["grid_res_m"]) if PARAMS_RAW.get("grid_res_m") is not None else None,
+    grid_size=int(PARAMS_RAW.get("grid_size", 200)),
+    extent_buffer_mult=float(PARAMS_RAW.get("extent_buffer_mult", 3.0)),
+)
+
+if not os.path.exists(INPUT_CSV):
+    raise FileNotFoundError(f"Bundled input data not found: {INPUT_CSV}")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+df = pd.read_csv(INPUT_CSV)
+required = {"animal_id", "longitude", "latitude"}
+missing = sorted(required - set(df.columns))
+if missing:
+    raise ValueError(f"Bundled input_data.csv is missing required columns: {missing}")
+
+
+def kde_core(latitudes, longitudes, percent=95, params=PARAMS):
+    lon0 = float(np.mean(longitudes))
+    lat0 = float(np.mean(latitudes))
+    zone = int((lon0 + 180) // 6) + 1
+    epsg_utm = 32600 + zone if lat0 >= 0 else 32700 + zone
+    to_utm = Transformer.from_crs("epsg:4326", f"epsg:{epsg_utm}", always_xy=True)
+    to_ll = Transformer.from_crs(f"epsg:{epsg_utm}", "epsg:4326", always_xy=True)
+
+    x, y = to_utm.transform(longitudes, latitudes)
+    XY = np.vstack([x, y]).T
+    n = len(XY)
+    if n < 2:
+        return None, None, None, None, None
+
+    if params.bandwidth_m and params.bandwidth_m > 0:
+        h = float(params.bandwidth_m)
+    else:
+        if n > 1:
+            stds = np.std(XY, axis=0, ddof=1)
+            h = (4 / (3 * n)) ** (1 / 5) * float(np.mean(stds))
+            if h < 1:
+                h = 30.0
+        else:
+            h = 30.0
+
+    m = float(params.extent_buffer_mult) * h
+    xmin, xmax = x.min() - m, x.max() + m
+    ymin, ymax = y.min() - m, y.max() + m
+
+    if params.grid_res_m and params.grid_res_m > 0:
+        step = float(params.grid_res_m)
+        gx = np.arange(xmin, xmax + step, step)
+        gy = np.arange(ymin, ymax + step, step)
+    else:
+        gx = np.linspace(xmin, xmax, max(25, int(params.grid_size)))
+        gy = np.linspace(ymin, ymax, max(25, int(params.grid_size)))
+
+    Xg, Yg = np.meshgrid(gx, gy)
+    grid = np.vstack([Xg.ravel(), Yg.ravel()]).T
+
+    kde = KernelDensity(bandwidth=h, kernel=params.kernel.lower()).fit(XY)
+    Z = np.exp(kde.score_samples(grid)).reshape(Xg.shape)
+
+    dx = gx[1] - gx[0] if len(gx) > 1 else h
+    dy = gy[1] - gy[0] if len(gy) > 1 else h
+    cell_area = dx * dy
+    total = float(Z.sum() * cell_area)
+    if total <= 0:
+        return None, None, None, None, None
+    Z /= total
+
+    Zf = Z.ravel()
+    idx = np.argsort(Zf)[::-1]
+    csum = np.cumsum(Zf[idx] * cell_area)
+    k = min(np.searchsorted(csum, percent / 100.0), len(idx) - 1)
+    thr = float(Zf[idx][k])
+    mask = Z >= thr
+
+    Zm = np.where(mask, Z, 0.0)
+    masked_total = float(Zm.sum() * cell_area)
+    if masked_total > 0:
+        Zm /= masked_total
+
+    contours = measure.find_contours(mask.astype(float), 0.5)
+    polys = []
+    for c in contours:
+        px, py = c[:, 1], c[:, 0]
+        xs = np.interp(px, np.arange(Xg.shape[1]), gx)
+        ys = np.interp(py, np.arange(Xg.shape[0]), gy)
+        p = Polygon(zip(xs, ys)).buffer(0)
+        if p.is_valid and p.area > 0:
+            polys.append(p)
+    if not polys:
+        return None, None, None, None, None
+
+    mp_utm = unary_union(polys)
+
+    def utm_to_ll(geom):
+        if geom.is_empty:
+            return None
+        if isinstance(geom, Polygon):
+            elon, elat = to_ll.transform(*geom.exterior.xy)
+            holes = [to_ll.transform(*ring.xy) for ring in geom.interiors]
+            return Polygon(list(zip(elon, elat)), [list(zip(hlon, hlat)) for hlon, hlat in holes])
+        if isinstance(geom, MultiPolygon):
+            parts = [utm_to_ll(g) for g in geom.geoms if not g.is_empty]
+            parts = [g for g in parts if g is not None]
+            return MultiPolygon(parts) if len(parts) > 1 else (parts[0] if parts else None)
+        return None
+
+    mp_ll = utm_to_ll(mp_utm)
+    area_km2 = float(mp_utm.area / 1e6)
+    return mp_ll, area_km2, Zm, (xmin, ymin, xmax, ymax), to_ll
+
+
+rows = []
+features_all = []
+index = {"animals": {}}
+created_geojsons = []
+
+for animal in df["animal_id"].astype(str).unique():
+    index["animals"][animal] = {}
+    track = df[df["animal_id"].astype(str) == animal]
+    latitudes = track["latitude"].to_numpy(dtype=float)
+    longitudes = track["longitude"].to_numpy(dtype=float)
+
+    for percent in sorted(set(PERCENTS)):
+        if percent < 1 or percent > 99:
+            continue
+        result = kde_core(latitudes, longitudes, percent=percent, params=PARAMS)
+        poly_ll, area_km2, Zm, bbox, to_ll = result
+        if poly_ll is None or Zm is None or bbox is None or to_ll is None:
+            continue
+
+        xmin, ymin, xmax, ymax = bbox
+        lon_sw, lat_sw = to_ll.transform(xmin, ymin)
+        lon_ne, lat_ne = to_ll.transform(xmax, ymax)
+        safe = str(animal).replace(" ", "_").replace("/", "_")
+
+        tif_path = os.path.join(OUTPUT_DIR, f"kde_{safe}_{int(percent)}.tif")
+        with rasterio.open(
+            tif_path,
+            "w",
+            driver="GTiff",
+            height=Zm.shape[0],
+            width=Zm.shape[1],
+            count=1,
+            dtype=Zm.dtype,
+            crs="EPSG:4326",
+            transform=from_origin(
+                lon_sw,
+                lat_ne,
+                (lon_ne - lon_sw) / Zm.shape[1],
+                (lat_ne - lat_sw) / Zm.shape[0],
+            ),
+        ) as dst:
+            dst.write(np.flipud(Zm), 1)
+
+        geojson_path = os.path.join(OUTPUT_DIR, f"kde_{safe}_{int(percent)}.geojson")
+        with open(geojson_path, "w", encoding="utf-8") as f:
+            json.dump(mapping(poly_ll), f)
+        created_geojsons.append(geojson_path)
+
+        rows.append((animal, f"KDE-{int(percent)}", area_km2))
+        index["animals"][animal][str(int(percent))] = {
+            "area_km2": area_km2,
+            "geotiff": tif_path,
+            "geojson": geojson_path,
+        }
+        features_all.append({
+            "type": "Feature",
+            "properties": {"animal_id": str(animal), "percent": int(percent), "area_km2": area_km2},
+            "geometry": mapping(poly_ll),
+        })
+
+if rows:
+    areas = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"]).sort_values(["animal_id", "type"])
+    areas.to_csv(os.path.join(OUTPUT_DIR, "home_range_areas.csv"), index=False)
+
+if any(index["animals"].values()):
+    with open(os.path.join(OUTPUT_DIR, "kde_index.json"), "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2)
+
+if features_all:
+    with open(os.path.join(OUTPUT_DIR, "kdes_all.geojson"), "w", encoding="utf-8") as f:
+        json.dump({"type": "FeatureCollection", "features": features_all}, f)
+    for path in created_geojsons:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+archive_path = os.path.join(OUTPUT_DIR, "spatchat_results.zip")
+if os.path.exists(archive_path):
+    os.remove(archive_path)
+with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+    for root, _, files in os.walk(OUTPUT_DIR):
+        for file in files:
+            if file.endswith(".zip"):
+                continue
+            full_path = os.path.join(root, file)
+            rel_path = os.path.relpath(full_path, OUTPUT_DIR)
+            zipf.write(full_path, arcname=rel_path)
+
+print(f"KDE outputs written to: {OUTPUT_DIR}")
+print(f"Zip archive: {archive_path}")

@@ -1,0 +1,63 @@
+# Standalone reproducibility script for SpatChat displacement analysis
+# Install requirements first:
+#   pip install pandas numpy matplotlib pyproj
+# Rename this file to .py if you want to run it directly.
+
+import os
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from movement_common import build_track_metrics, ensure_output_dir, summarize_numeric
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+INPUT_CSV = os.path.join(SCRIPT_DIR, "input_data.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs")
+
+if not os.path.exists(INPUT_CSV):
+    raise FileNotFoundError(f"Bundled input data not found: {INPUT_CSV}")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+df = pd.read_csv(INPUT_CSV)
+metrics = build_track_metrics(df)
+if metrics.empty:
+    raise ValueError("No valid coordinates were available for displacement analysis.")
+
+outdir = ensure_output_dir(OUTPUT_DIR, "movement_analysis")
+csv_path = os.path.join(outdir, "displacement_metrics.csv")
+metrics.to_csv(csv_path, index=False)
+
+summary_rows = []
+for animal_id, group in metrics.groupby("animal_id", dropna=False):
+    net_stats = summarize_numeric(group["net_displacement_m"])
+    path_stats = summarize_numeric(group["cumulative_distance_m"])
+    summary_rows.append({
+        "animal_id": animal_id,
+        "n_fixes": int(len(group)),
+        "max_net_displacement_m": net_stats["max"],
+        "mean_net_displacement_m": net_stats["mean"],
+        "final_cumulative_distance_m": float(group["cumulative_distance_m"].iloc[-1]),
+        "mean_cumulative_distance_m": path_stats["mean"],
+    })
+
+summary = pd.DataFrame(summary_rows).sort_values("animal_id")
+summary.to_csv(os.path.join(outdir, "displacement_summary.csv"), index=False)
+
+fig, axes = plt.subplots(2, 1, figsize=(10, 8), constrained_layout=True)
+for animal_id, group in metrics.groupby("animal_id", dropna=False):
+    x = group["obs_index"]
+    axes[0].plot(x, group["net_displacement_m"], label=str(animal_id))
+    axes[1].plot(x, group["cumulative_distance_m"], label=str(animal_id))
+axes[0].set_title("Net Displacement by Observation")
+axes[0].set_xlabel("Observation Index")
+axes[0].set_ylabel("Net Displacement (m)")
+axes[1].set_title("Cumulative Distance by Observation")
+axes[1].set_xlabel("Observation Index")
+axes[1].set_ylabel("Cumulative Distance (m)")
+if metrics["animal_id"].nunique() <= 8:
+    axes[0].legend()
+    axes[1].legend()
+fig.savefig(os.path.join(outdir, "displacement_plots.png"), dpi=180)
+plt.close(fig)
+
+print(f"Displacement analysis reproduced in: {outdir}")

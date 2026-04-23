@@ -139,7 +139,8 @@ def add_kdes(df, percent_list, params: KDEParams = _DEFAULT_PARAMS):
     Compute KDE UDs for each requested percent and animal. Writes GeoTIFF + GeoJSON.
     `params` controls bandwidth (m), kernel, and grid resolution (m).
     """
-    os.makedirs("outputs", exist_ok=True)
+    outputs_dir = storage.get_output_dir()
+    os.makedirs(outputs_dir, exist_ok=True)
     for percent in percent_list:
         for animal in df["animal_id"].unique():
             storage.kde_results.setdefault(animal, {})
@@ -162,7 +163,7 @@ def add_kdes(df, percent_list, params: KDEParams = _DEFAULT_PARAMS):
             lon_ne, lat_ne = to_ll.transform(xmax, ymax)
 
             safe = str(animal).replace(" ","_").replace("/","_")
-            tif = os.path.join("outputs", f"kde_{safe}_{percent}.tif")
+            tif = os.path.join(outputs_dir, f"kde_{safe}_{percent}.tif")
             with rasterio.open(
                 tif, "w", driver="GTiff",
                 height=Zm.shape[0], width=Zm.shape[1], count=1, dtype=Zm.dtype,
@@ -174,7 +175,7 @@ def add_kdes(df, percent_list, params: KDEParams = _DEFAULT_PARAMS):
                 # flipud because array row 0 is north in our mesh, but GeoTIFF row 0 is top
                 dst.write(np.flipud(Zm), 1)
 
-            gj = os.path.join("outputs", f"kde_{safe}_{percent}.geojson")
+            gj = os.path.join(outputs_dir, f"kde_{safe}_{percent}.geojson")
             with open(gj, "w") as f:
                 json.dump(mapping(poly_ll), f)
 

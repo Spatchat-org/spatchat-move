@@ -6,8 +6,9 @@ import folium
 import rasterio
 import matplotlib.pyplot as plt
 from shapely.geometry import Polygon, MultiPolygon
-from map_utils import fit_map_to_bounds
+from map_utils import apply_map_control_patches, fit_map_to_bounds
 from pyproj import Transformer
+from branca.element import MacroElement, Template
 
 
 def _base_map(center_lat, center_lon, control_scale=True, zoom=9):
@@ -15,7 +16,7 @@ def _base_map(center_lat, center_lon, control_scale=True, zoom=9):
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
     folium.TileLayer(
-        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        tiles="https://{s}.tile.opentopomap.org/{z}/{y}.png".replace('{y}', '{y}'),
         attr="OpenTopoMap", name="Topographic"
     ).add_to(m)
     folium.TileLayer(
@@ -24,15 +25,97 @@ def _base_map(center_lat, center_lon, control_scale=True, zoom=9):
     ).add_to(m)
     return m
 
+
+def _add_layer_control_style_patch(m):
+    root = m.get_root()
+    if getattr(root, "_spatchat_layer_control_style_patch_added", False):
+        return
+    setattr(root, "_spatchat_layer_control_style_patch_added", True)
+    patch = MacroElement()
+    patch._template = Template("""
+    {% macro html(this, kwargs) %}
+    <style>
+      .leaflet-control-layers {
+        background: rgba(30, 30, 30, 0.9) !important;
+        color: #f5f5f5 !important;
+        border-radius: 8px !important;
+        border: none !important;
+        box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35) !important;
+      }
+      .leaflet-control-layers-toggle {
+        background-color: rgba(30, 30, 30, 0.9) !important;
+        border-radius: 8px !important;
+        filter: invert(1) brightness(1.25);
+      }
+      .leaflet-control-layers-expanded {
+        padding: 0 !important;
+        background: rgba(30, 30, 30, 0.9) !important;
+      }
+      .leaflet-control-layers-list,
+      .leaflet-control-layers form,
+      .leaflet-control-layers .leaflet-control-layers-base,
+      .leaflet-control-layers .leaflet-control-layers-overlays,
+      .leaflet-control-layers .leaflet-control-layers-separator {
+        background: rgba(30, 30, 30, 0.9) !important;
+        color: inherit !important;
+        border-color: rgba(255, 255, 255, 0.08) !important;
+      }
+      .leaflet-control-layers label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 10px;
+        margin: 0;
+        color: #f5f5f5 !important;
+        font-size: 12px;
+        line-height: 1.3;
+      }
+      .leaflet-control-layers label:hover {
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .leaflet-control-layers input[type="checkbox"],
+      .leaflet-control-layers input[type="radio"] {
+        accent-color: #8ec5ff;
+      }
+      .leaflet-control-layers .leaflet-control-layers-separator {
+        margin: 0;
+      }
+      .leaflet-control-layers,
+      .leaflet-control-layers .leaflet-control-layers-list {
+        scrollbar-color: rgba(255, 255, 255, 0.18) rgba(255, 255, 255, 0.06);
+        scrollbar-width: thin;
+      }
+      .leaflet-control-layers::-webkit-scrollbar,
+      .leaflet-control-layers .leaflet-control-layers-list::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      .leaflet-control-layers::-webkit-scrollbar-track,
+      .leaflet-control-layers .leaflet-control-layers-list::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .leaflet-control-layers::-webkit-scrollbar-thumb,
+      .leaflet-control-layers .leaflet-control-layers-list::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.18);
+        border-radius: 999px;
+      }
+      .leaflet-control-layers::-webkit-scrollbar-thumb:hover,
+      .leaflet-control-layers .leaflet-control-layers-list::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.26);
+      }
+    </style>
+    {% endmacro %}
+    """)
+    root.add_child(patch)
+
+
 def build_preview_map(df):
-    """Points + (optional) tracks, layer control, zoom to data."""
     has_timestamp = "timestamp" in df.columns
     m = _base_map(df["latitude"].mean(), df["longitude"].mean(), control_scale=True, zoom=9)
 
     points_layer = folium.FeatureGroup(name="Points", show=True)
-    lines_layer  = folium.FeatureGroup(name="Tracks", show=True)
+    lines_layer = folium.FeatureGroup(name="Tracks", show=True)
 
-    # handle presence/absence of animal_id
     animal_ids = df["animal_id"].unique() if "animal_id" in df.columns else ["sample"]
     color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
 
@@ -59,13 +142,12 @@ def build_preview_map(df):
     if has_timestamp:
         lines_layer.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
+    apply_map_control_patches(m)
     m = fit_map_to_bounds(m, df)
     return m._repr_html_()
 
-# ---------- New small builders ----------
 
 def make_points_tracks_layers(df, color_map):
-    """Return (points_layer, tracks_layer) FeatureGroups."""
     points_layer = folium.FeatureGroup(name="Points", show=True)
     tracks_layer = folium.FeatureGroup(name="Tracks", show=True)
     has_timestamp = "timestamp" in df.columns
@@ -90,15 +172,14 @@ def make_points_tracks_layers(df, color_map):
             ).add_to(points_layer)
     return points_layer, tracks_layer
 
+
 def make_mcp_layers(mcp_results, requested_percents, animal_ids, color_map):
-    """Return a list of FeatureGroups for MCP polygons."""
     layers = []
     for percent in requested_percents:
         for animal in animal_ids:
             if animal in mcp_results and percent in mcp_results[animal]:
                 v = mcp_results[animal][percent]
                 layer = folium.FeatureGroup(name=f"{animal} MCP {percent}%", show=True)
-                # v["polygon"] is shapely poly with (lon,lat). Folium expects (lat,lon)
                 layer.add_child(
                     folium.Polygon(
                         locations=[(lat, lon) for lon, lat in np.array(v["polygon"].exterior.coords)],
@@ -111,32 +192,23 @@ def make_mcp_layers(mcp_results, requested_percents, animal_ids, color_map):
                 layers.append(layer)
     return layers
 
+
 def make_kde_layers(kde_results, requested_kde_percents, animal_ids, color_map):
-    """Return a list of FeatureGroups for KDE raster + contour layers."""
     layers = []
     for animal in animal_ids:
         kde_percs = [p for p in requested_kde_percents if animal in kde_results and p in kde_results[animal]]
-
-        # Raster: only for the highest % requested per animal
         if kde_percs:
             max_perc = max(kde_percs)
             v = kde_results[animal][max_perc]
             raster_layer = folium.FeatureGroup(name=f"{animal} KDE Raster", show=True)
             with rasterio.open(v["geotiff"]) as src:
-                arr = src.read(1)
-                arr = np.nan_to_num(arr, nan=0.0)
-                # simple min-max stretch
+                arr = np.nan_to_num(src.read(1), nan=0.0)
                 a, b = float(arr.min()), float(arr.max())
-                if b > a:
-                    arr_norm = (arr - a) / (b - a)
-                else:
-                    arr_norm = np.zeros_like(arr, dtype=np.float32)
+                arr_norm = (arr - a) / (b - a) if b > a else np.zeros_like(arr, dtype=np.float32)
                 cmap = plt.get_cmap('plasma')
                 rgba = (cmap(arr_norm) * 255).astype(np.uint8)
                 bounds = src.bounds
-                img = np.dstack([
-                    rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], (rgba[:, :, 3]*0.7).astype(np.uint8)
-                ])
+                img = np.dstack([rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], (rgba[:, :, 3] * 0.7).astype(np.uint8)])
                 raster_layer.add_child(
                     folium.raster_layers.ImageOverlay(
                         image=img,
@@ -147,7 +219,6 @@ def make_kde_layers(kde_results, requested_kde_percents, animal_ids, color_map):
                 )
             layers.append(raster_layer)
 
-        # Contours: all requested %
         for percent in kde_percs:
             v = kde_results[animal][percent]
             contour_layer = folium.FeatureGroup(name=f"{animal} KDE {percent}% Contour", show=True)
@@ -177,8 +248,69 @@ def make_kde_layers(kde_results, requested_kde_percents, animal_ids, color_map):
             layers.append(contour_layer)
     return layers
 
+
+def make_akde_layers(akde_results, requested_akde_percents, animal_ids, color_map):
+    layers = []
+    for animal in animal_ids:
+        akde_percs = [p for p in requested_akde_percents if animal in akde_results and p in akde_results[animal]]
+        if akde_percs:
+            max_perc = max(akde_percs)
+            v = akde_results[animal][max_perc]
+            tif_path = v.get("geotiff")
+            if tif_path and os.path.exists(tif_path):
+                raster_layer = folium.FeatureGroup(name=f"{animal} AKDE Raster", show=True)
+                with rasterio.open(tif_path) as src:
+                    arr = np.nan_to_num(src.read(1), nan=0.0)
+                    a, b = float(arr.min()), float(arr.max())
+                    arr_norm = (arr - a) / (b - a) if b > a else np.zeros_like(arr, dtype=np.float32)
+                    cmap = plt.get_cmap("plasma")
+                    rgba = (cmap(arr_norm) * 255).astype(np.uint8)
+                    bounds = src.bounds
+                    img = np.dstack([
+                        rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2],
+                        (rgba[:, :, 3] * 0.7).astype(np.uint8)
+                    ])
+                    raster_layer.add_child(
+                        folium.raster_layers.ImageOverlay(
+                            image=img,
+                            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+                            opacity=0.7,
+                            interactive=False
+                        )
+                    )
+                layers.append(raster_layer)
+
+        for percent in akde_percs:
+            v = akde_results[animal][percent]
+            contour_layer = folium.FeatureGroup(name=f"{animal} AKDE {percent}% Contour", show=True)
+            contour = v.get("contour")
+            if contour:
+                if isinstance(contour, MultiPolygon):
+                    for poly in contour.geoms:
+                        contour_layer.add_child(
+                            folium.Polygon(
+                                locations=[(lat, lon) for lon, lat in poly.exterior.coords],
+                                color=color_map[animal],
+                                fill=True,
+                                fill_opacity=0.2,
+                                popup=f"{animal} AKDE {percent}% Contour"
+                            )
+                        )
+                elif isinstance(contour, Polygon):
+                    contour_layer.add_child(
+                        folium.Polygon(
+                            locations=[(lat, lon) for lon, lat in contour.exterior.coords],
+                            color=color_map[animal],
+                            fill=True,
+                            fill_opacity=0.2,
+                            popup=f"{animal} AKDE {percent}% Contour"
+                        )
+                    )
+            layers.append(contour_layer)
+    return layers
+
+
 def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: str = "LoCoH"):
-    """Envelopes at requested isopleths (e.g., 50/95). Visible by default."""
     layers = []
     animals_dict = locoh_result.get("animals", {}) if locoh_result else {}
     for animal in animal_ids:
@@ -212,11 +344,11 @@ def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: st
             layers.append(layer)
     return layers
 
+
 def make_locoh_facets_layers(locoh_result: dict, animal_ids, color_map, name_prefix: str = "LoCoH facets"):
-    """Local hull “facets” colored by cumulative percent (red→yellow). Visible by default."""
-    # bins & palette (deep red → pale yellow)
     bins = [20, 40, 60, 80, 95, 100]
-    palette = {20:"#d7301f", 40:"#ef6548", 60:"#fc8d59", 80:"#fdbb84", 95:"#fdd49e", 100:"#fee8c8"}
+    palette = {20: "#d7301f", 40: "#ef6548", 60: "#fc8d59", 80: "#fdbb84", 95: "#fdd49e", 100: "#fee8c8"}
+
     def color_for(pct: int) -> str:
         for b in bins:
             if pct <= b:
@@ -257,21 +389,14 @@ def make_locoh_facets_layers(locoh_result: dict, animal_ids, color_map, name_pre
         layers.append(layer)
     return layers
 
-def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix: str = "dBBMM"):
-    """
-    Build per-animal raster + isopleth layers for dBBMM results.
-    Expects each animal entry to be either a dict or a DBBMMResult with:
-      - geotiff: path to EPSG:3857 GeoTIFF UD
-      - isopleths: [{percent, area_sq_km, geometry (GeoJSON in WGS84)}, ...]
-    """
-    layers = []
 
+def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix: str = "dBBMM"):
+    layers = []
     for animal in animal_ids:
         data = dbbmm_results.get(str(animal)) or dbbmm_results.get(animal)
         if not data:
             continue
 
-        # Support both dict and dataclass-like objects
         if isinstance(data, dict):
             tif_path = data.get("geotiff")
             iso_list = data.get("isopleths") or []
@@ -281,13 +406,10 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix: s
 
         color = color_map[animal]
 
-        # 1) UD raster overlay (shown by default)
         if tif_path and os.path.exists(tif_path):
             raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
             with rasterio.open(tif_path) as src:
                 arr = src.read(1).astype(np.float32)
-
-                # Normalize to [0,1] if there is signal
                 if np.isfinite(arr).any():
                     amax = float(np.nanmax(arr))
                     amin = float(np.nanmin(arr))
@@ -297,37 +419,26 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix: s
                 if amax > amin:
                     arr = np.nan_to_num(arr, nan=0.0)
                     arr_norm = (arr - amin) / (amax - amin)
-
                     cmap = plt.get_cmap("plasma")
                     rgba = (cmap(arr_norm) * 255).astype(np.uint8)
 
-                    # Bounds → WGS84
                     b = src.bounds
                     src_crs = src.crs.to_string() if src.crs else "EPSG:3857"
                     to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
                     pts = [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]
-                    ll = [to_wgs.transform(x, y) for x, y in pts]  # (lon, lat)
-                    west = min(p[0] for p in ll); east = max(p[0] for p in ll)
-                    south = min(p[1] for p in ll); north = max(p[1] for p in ll)
+                    ll = [to_wgs.transform(x, y) for x, y in pts]
+                    west = min(p[0] for p in ll)
+                    east = max(p[0] for p in ll)
+                    south = min(p[1] for p in ll)
+                    north = max(p[1] for p in ll)
                     bounds_ll = [[south, west], [north, east]]
 
-                    # RGBA image for Leaflet
-                    img = np.dstack([
-                        rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2],
-                        rgba[:, :, 3].astype(np.uint8)
-                    ])
-
+                    img = np.dstack([rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], rgba[:, :, 3].astype(np.uint8)])
                     raster_layer.add_child(
-                        folium.raster_layers.ImageOverlay(
-                            image=img,
-                            bounds=bounds_ll,
-                            opacity=0.80,
-                            interactive=False,
-                        )
+                        folium.raster_layers.ImageOverlay(image=img, bounds=bounds_ll, opacity=0.80, interactive=False)
                     )
                     layers.append(raster_layer)
 
-        # 2) Isopleth polygons (shown by default)
         for item in iso_list:
             percent = int(item.get("percent"))
             geom = item.get("geometry")
@@ -337,18 +448,10 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix: s
                 folium.GeoJson(
                     data={
                         "type": "Feature",
-                        "properties": {
-                            "animal_id": str(animal),
-                            "percent": percent,
-                            "area_km2": round(area_km2, 3),
-                        },
+                        "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(area_km2, 3)},
                         "geometry": geom,
                     },
-                    style_function=lambda _feat, color=color: {
-                        "fillOpacity": 0.25,
-                        "weight": 2,
-                        "color": color,
-                    },
+                    style_function=lambda _feat, color=color: {"fillOpacity": 0.25, "weight": 2, "color": color},
                     tooltip=folium.GeoJsonTooltip(
                         fields=["animal_id", "percent", "area_km2"],
                         aliases=["Animal", "Isopleth (%)", "Area (km²)"],
@@ -356,52 +459,47 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix: s
                     ),
                 ).add_to(layer)
             layers.append(layer)
-
     return layers
 
 # ---------- Composition entrypoint ----------
-
 def build_results_map(
     df,
     mcp_results,
     kde_results,
     requested_percents,
     requested_kde_percents,
+    akde_results=None,
+    requested_akde_percents=None,
     locoh_result=None,
-    dbbmm_result=None
+    dbbmm_result=None,
 ):
-    """Full map: points/tracks + estimator-specific layers (MCP, KDE, LoCoH, dBBMM)."""
-    m = _base_map(df["latitude"].mean(), df["longitude"].mean(), control_scale=False, zoom=9)
+    m = _base_map(df["latitude"].mean(), df["longitude"].mean(), control_scale=True, zoom=9)
 
-    # Consistent colors per animal across all estimators
     animal_ids = df["animal_id"].unique() if "animal_id" in df.columns else ["sample"]
     color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
 
-    # Points/Tracks
     points_layer, tracks_layer = make_points_tracks_layers(df, color_map)
     points_layer.add_to(m)
     tracks_layer.add_to(m)
 
-    # MCP
     for layer in make_mcp_layers(mcp_results or {}, requested_percents or [], animal_ids, color_map):
         layer.add_to(m)
-
-    # KDE
     for layer in make_kde_layers(kde_results or {}, requested_kde_percents or [], animal_ids, color_map):
         layer.add_to(m)
+    for layer in make_akde_layers(akde_results or {}, requested_akde_percents or [], animal_ids, color_map):
+        layer.add_to(m)
 
-    # LoCoH
     if locoh_result is not None:
         for layer in make_locoh_layers(locoh_result, animal_ids, color_map, name_prefix="LoCoH"):
             layer.add_to(m)
         for layer in make_locoh_facets_layers(locoh_result, animal_ids, color_map, name_prefix="LoCoH facets"):
             layer.add_to(m)
 
-    # dBBMM
     if dbbmm_result is not None:
         for layer in make_dbbmm_layers(dbbmm_result, animal_ids, color_map, name_prefix="dBBMM"):
             layer.add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
+    apply_map_control_patches(m)
     m = fit_map_to_bounds(m, df)
     return m._repr_html_()

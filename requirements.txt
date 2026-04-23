@@ -3,6 +3,7 @@ pandas
 folium
 pyproj
 together
+huggingface_hub
 python-dotenv
 scipy
 shapely

@@ -1,0 +1,118 @@
+import os
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+from pyproj import Transformer
+
+
+def ensure_output_dir(output_dir: str, subdir: Optional[str] = None) -> str:
+    path = output_dir
+    if subdir:
+        path = os.path.join(output_dir, subdir)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def safe_name(value) -> str:
+    return str(value).replace(" ", "_").replace("/", "_").replace("\\", "_")
+
+
+def sort_track(df: pd.DataFrame) -> pd.DataFrame:
+    track = df.copy()
+    if "timestamp" in track.columns:
+        ts = pd.to_datetime(track["timestamp"], errors="coerce", utc=True)
+        track = track.assign(_sort_ts=ts).sort_values(["_sort_ts"]).drop(columns=["_sort_ts"])
+    return track.reset_index(drop=True)
+
+
+def project_track(longitudes: np.ndarray, latitudes: np.ndarray):
+    lon0 = float(np.nanmean(longitudes))
+    lat0 = float(np.nanmean(latitudes))
+    zone = int((lon0 + 180.0) // 6.0) + 1
+    zone = max(1, min(60, zone))
+    epsg_utm = 32600 + zone if lat0 >= 0 else 32700 + zone
+    to_utm = Transformer.from_crs("epsg:4326", f"epsg:{epsg_utm}", always_xy=True)
+    x, y = to_utm.transform(longitudes, latitudes)
+    return np.asarray(x, dtype=float), np.asarray(y, dtype=float), epsg_utm
+
+
+def build_track_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    data = df.copy()
+    animal_col = "animal_id" if "animal_id" in data.columns else None
+    groups = data.groupby(animal_col, dropna=False) if animal_col else [("sample", data)]
+    rows = []
+
+    for animal_id, raw_track in groups:
+        track = sort_track(raw_track)
+        if len(track) < 1:
+            continue
+
+        lat = pd.to_numeric(track["latitude"], errors="coerce").to_numpy(dtype=float)
+        lon = pd.to_numeric(track["longitude"], errors="coerce").to_numpy(dtype=float)
+        valid = np.isfinite(lat) & np.isfinite(lon)
+        track = track.loc[valid].reset_index(drop=True)
+        lat = lat[valid]
+        lon = lon[valid]
+        if len(track) < 1:
+            continue
+
+        x, y, epsg_utm = project_track(lon, lat)
+        dx = np.full(len(track), np.nan, dtype=float)
+        dy = np.full(len(track), np.nan, dtype=float)
+        dx[1:] = np.diff(x)
+        dy[1:] = np.diff(y)
+        step_length = np.hypot(dx, dy)
+        bearing = np.full(len(track), np.nan, dtype=float)
+        bearing[1:] = np.arctan2(dy[1:], dx[1:])
+        turning = np.full(len(track), np.nan, dtype=float)
+        if len(track) >= 3:
+            delta = np.diff(bearing[1:])
+            turning[2:] = (delta + np.pi) % (2 * np.pi) - np.pi
+
+        net_dx = x - x[0]
+        net_dy = y - y[0]
+        net_displacement = np.hypot(net_dx, net_dy)
+        cumulative_distance = np.nancumsum(np.where(np.isfinite(step_length), step_length, 0.0))
+
+        timestamps = None
+        if "timestamp" in track.columns:
+            timestamps = pd.to_datetime(track["timestamp"], errors="coerce", utc=True)
+
+        for idx in range(len(track)):
+            rows.append({
+                "animal_id": str(animal_id),
+                "obs_index": int(idx),
+                "timestamp": timestamps.iloc[idx].isoformat() if timestamps is not None and pd.notna(timestamps.iloc[idx]) else None,
+                "longitude": float(lon[idx]),
+                "latitude": float(lat[idx]),
+                "x_m": float(x[idx]),
+                "y_m": float(y[idx]),
+                "dx_m": float(dx[idx]) if np.isfinite(dx[idx]) else np.nan,
+                "dy_m": float(dy[idx]) if np.isfinite(dy[idx]) else np.nan,
+                "step_length_m": float(step_length[idx]) if np.isfinite(step_length[idx]) else np.nan,
+                "bearing_rad": float(bearing[idx]) if np.isfinite(bearing[idx]) else np.nan,
+                "turning_angle_rad": float(turning[idx]) if np.isfinite(turning[idx]) else np.nan,
+                "turning_angle_deg": float(np.degrees(turning[idx])) if np.isfinite(turning[idx]) else np.nan,
+                "net_displacement_m": float(net_displacement[idx]),
+                "cumulative_distance_m": float(cumulative_distance[idx]),
+                "utm_epsg": int(epsg_utm),
+            })
+
+    return pd.DataFrame(rows)
+
+
+def summarize_numeric(series: pd.Series) -> dict:
+    vals = pd.to_numeric(series, errors="coerce").dropna()
+    if vals.empty:
+        return {"n": 0, "mean": np.nan, "median": np.nan, "sd": np.nan, "max": np.nan}
+    return {
+        "n": int(vals.shape[0]),
+        "mean": float(vals.mean()),
+        "median": float(vals.median()),
+        "sd": float(vals.std(ddof=1)) if vals.shape[0] > 1 else 0.0,
+        "max": float(vals.max()),
+    }

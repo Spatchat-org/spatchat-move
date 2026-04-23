@@ -1,0 +1,98 @@
+# Standalone reproducibility script for SpatChat autocorrelation analysis
+# Install requirements first:
+#   pip install pandas numpy matplotlib pyproj
+# Rename this file to .py if you want to run it directly.
+#
+# USER ARGUMENTS:
+# - MAX_LAG: defaults to repro_config.json when present, otherwise 20.
+
+import json
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from movement_common import build_track_metrics, ensure_output_dir
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+INPUT_CSV = os.path.join(SCRIPT_DIR, "input_data.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs")
+
+CONFIG = {}
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        CONFIG = json.load(f)
+
+MAX_LAG = int(CONFIG.get("movement", {}).get("max_lag", 20))
+
+if not os.path.exists(INPUT_CSV):
+    raise FileNotFoundError(f"Bundled input data not found: {INPUT_CSV}")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+df = pd.read_csv(INPUT_CSV)
+metrics = build_track_metrics(df)
+if metrics.empty:
+    raise ValueError("No valid coordinates were available for autocorrelation analysis.")
+
+
+def acf(values: np.ndarray, max_lag: int) -> list[float]:
+    x = np.asarray(values, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 2:
+        return []
+    x = x - np.mean(x)
+    denom = np.dot(x, x)
+    if denom <= 0:
+        return []
+    out = []
+    for lag in range(1, min(max_lag, x.size - 1) + 1):
+        out.append(float(np.dot(x[:-lag], x[lag:]) / denom))
+    return out
+
+
+rows = []
+for animal_id, group in metrics.groupby("animal_id", dropna=False):
+    step_acf = acf(group["step_length_m"].to_numpy(dtype=float), max_lag=MAX_LAG)
+    net_acf = acf(group["net_displacement_m"].to_numpy(dtype=float), max_lag=MAX_LAG)
+    for lag, value in enumerate(step_acf, start=1):
+        rows.append({"animal_id": animal_id, "metric": "step_length_m", "lag": lag, "autocorrelation": value})
+    for lag, value in enumerate(net_acf, start=1):
+        rows.append({"animal_id": animal_id, "metric": "net_displacement_m", "lag": lag, "autocorrelation": value})
+
+acf_df = pd.DataFrame(rows)
+if acf_df.empty:
+    raise ValueError("Not enough sequential observations were available for autocorrelation analysis.")
+
+outdir = ensure_output_dir(OUTPUT_DIR, "movement_analysis")
+acf_df.to_csv(os.path.join(outdir, "autocorrelation_diagnostics.csv"), index=False)
+
+fig, axes = plt.subplots(2, 1, figsize=(10, 8), constrained_layout=True)
+for animal_id, group in acf_df[acf_df["metric"] == "step_length_m"].groupby("animal_id", dropna=False):
+    axes[0].plot(group["lag"], group["autocorrelation"], marker="o", label=str(animal_id))
+for animal_id, group in acf_df[acf_df["metric"] == "net_displacement_m"].groupby("animal_id", dropna=False):
+    axes[1].plot(group["lag"], group["autocorrelation"], marker="o", label=str(animal_id))
+axes[0].axhline(0, color="black", linewidth=0.8)
+axes[1].axhline(0, color="black", linewidth=0.8)
+axes[0].set_title("Step-Length Autocorrelation")
+axes[1].set_title("Net-Displacement Autocorrelation")
+axes[0].set_xlabel("Lag")
+axes[1].set_xlabel("Lag")
+axes[0].set_ylabel("ACF")
+axes[1].set_ylabel("ACF")
+if acf_df["animal_id"].nunique() <= 8:
+    axes[0].legend()
+    axes[1].legend()
+fig.savefig(os.path.join(outdir, "autocorrelation_plots.png"), dpi=180)
+plt.close(fig)
+
+summary = (
+    acf_df.groupby(["animal_id", "metric"], dropna=False)["autocorrelation"]
+    .agg(["mean", "max", "min"])
+    .reset_index()
+    .rename(columns={"mean": "mean_acf", "max": "max_acf", "min": "min_acf"})
+)
+summary.to_csv(os.path.join(outdir, "autocorrelation_summary.csv"), index=False)
+
+print(f"Autocorrelation analysis reproduced in: {outdir}")

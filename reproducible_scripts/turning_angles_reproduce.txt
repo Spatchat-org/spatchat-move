@@ -1,0 +1,63 @@
+# Standalone reproducibility script for SpatChat turning-angle analysis
+# Install requirements first:
+#   pip install pandas numpy matplotlib pyproj
+# Rename this file to .py if you want to run it directly.
+
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from movement_common import build_track_metrics, ensure_output_dir, summarize_numeric
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+INPUT_CSV = os.path.join(SCRIPT_DIR, "input_data.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs")
+
+if not os.path.exists(INPUT_CSV):
+    raise FileNotFoundError(f"Bundled input data not found: {INPUT_CSV}")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+df = pd.read_csv(INPUT_CSV)
+metrics = build_track_metrics(df)
+turns = metrics.dropna(subset=["turning_angle_deg"]).copy()
+if turns.empty:
+    raise ValueError("At least three fixes per track are required for turning-angle analysis.")
+
+outdir = ensure_output_dir(OUTPUT_DIR, "movement_analysis")
+turns.to_csv(os.path.join(outdir, "turning_angles.csv"), index=False)
+
+summary_rows = []
+for animal_id, group in turns.groupby("animal_id", dropna=False):
+    stats = summarize_numeric(group["turning_angle_deg"].abs())
+    summary_rows.append({
+        "animal_id": animal_id,
+        "n_turns": stats["n"],
+        "mean_abs_turning_angle_deg": stats["mean"],
+        "median_abs_turning_angle_deg": stats["median"],
+        "sd_abs_turning_angle_deg": stats["sd"],
+        "max_abs_turning_angle_deg": stats["max"],
+    })
+
+summary = pd.DataFrame(summary_rows).sort_values("animal_id")
+summary.to_csv(os.path.join(outdir, "turning_angle_summary.csv"), index=False)
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
+bins = np.linspace(-180, 180, 37)
+for animal_id, group in turns.groupby("animal_id", dropna=False):
+    axes[0].plot(group["obs_index"], group["turning_angle_deg"], label=str(animal_id))
+    axes[1].hist(group["turning_angle_deg"], bins=bins, alpha=0.35, label=str(animal_id))
+axes[0].set_title("Turning Angle by Observation")
+axes[0].set_xlabel("Observation Index")
+axes[0].set_ylabel("Turning Angle (deg)")
+axes[1].set_title("Turning Angle Distribution")
+axes[1].set_xlabel("Turning Angle (deg)")
+axes[1].set_ylabel("Frequency")
+if turns["animal_id"].nunique() <= 8:
+    axes[0].legend()
+    axes[1].legend()
+fig.savefig(os.path.join(outdir, "turning_angle_plots.png"), dpi=180)
+plt.close(fig)
+
+print(f"Turning-angle analysis reproduced in: {outdir}")

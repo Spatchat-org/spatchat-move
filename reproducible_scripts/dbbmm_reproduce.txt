@@ -1,0 +1,286 @@
+# Standalone reproducibility script for SpatChat dBBMM outputs
+# Install requirements first:
+#   pip install pandas numpy affine rasterio shapely pyproj
+# Rename this file to .py if you want to run it directly.
+#
+# USER ARGUMENTS:
+# - INPUT_CSV: by default uses bundled input_data.csv in this folder.
+# - OUTPUT_DIR: where reproduced outputs will be written.
+# - PARAMS: dBBMM settings. By default these come from repro_config.json.
+
+import json
+import math
+import os
+import zipfile
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+import rasterio
+from affine import Affine
+from pyproj import Transformer
+from rasterio.features import shapes as rio_shapes
+from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import mapping as shp_mapping
+from shapely.geometry import shape as shp_shape
+from shapely.ops import transform as shp_transform
+from shapely.ops import unary_union
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+INPUT_CSV = os.path.join(SCRIPT_DIR, "input_data.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs")
+
+CONFIG = {}
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        CONFIG = json.load(f)
+
+
+@dataclass
+class DBBMMParams:
+    location_error_m: float = 30.0
+    window_size: int = 31
+    margin: int = 11
+    raster_resolution_m: float = 50.0
+    buffer_m: float = 1000.0
+    n_substeps: int = 40
+    isopleths: tuple[int, ...] = (50, 95)
+
+
+PARAMS_RAW = CONFIG.get("dbbmm", {}).get("params", {}) or {}
+PERCENTS = [int(x) for x in CONFIG.get("dbbmm", {}).get("percents", [50, 95])]
+PARAMS = DBBMMParams(
+    location_error_m=float(PARAMS_RAW.get("location_error_m", 30.0)),
+    window_size=int(PARAMS_RAW.get("window_size", 31)),
+    margin=int(PARAMS_RAW.get("margin", 11)),
+    raster_resolution_m=float(PARAMS_RAW.get("raster_resolution_m", 50.0)),
+    buffer_m=float(PARAMS_RAW.get("buffer_m", 1000.0)),
+    n_substeps=int(PARAMS_RAW.get("n_substeps", 40)),
+    isopleths=tuple(int(x) for x in (PERCENTS or [50, 95])),
+)
+
+if not os.path.exists(INPUT_CSV):
+    raise FileNotFoundError(f"Bundled input data not found: {INPUT_CSV}")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+df = pd.read_csv(INPUT_CSV)
+required = {"animal_id", "longitude", "latitude", "timestamp"}
+missing = sorted(required - set(df.columns))
+if missing:
+    raise ValueError(f"Bundled input_data.csv is missing required columns: {missing}")
+
+
+def compute_dbbmm(dataframe, params=PARAMS):
+    to_eq = Transformer.from_crs(4326, 3857, always_xy=True)
+    to_wgs = Transformer.from_crs(3857, 4326, always_xy=True)
+
+    def reproj_geom(geom):
+        return shp_transform(lambda x, y, z=None: to_wgs.transform(x, y), geom)
+
+    df0 = dataframe[["animal_id", "longitude", "latitude", "timestamp"]].dropna().copy()
+    df0.columns = ["animal_id", "lon", "lat", "timestamp"]
+    df0["timestamp"] = pd.to_datetime(df0["timestamp"], errors="coerce")
+    df0 = df0.dropna(subset=["timestamp"])
+
+    results = {}
+    for animal, sub in df0.groupby("animal_id"):
+        sub = sub.sort_values("timestamp").reset_index(drop=True)
+        if len(sub) < 2:
+            continue
+
+        xs, ys = to_eq.transform(sub["lon"].values, sub["lat"].values)
+        ts = sub["timestamp"].astype("int64").to_numpy() / 1e9
+
+        dt = np.diff(ts)
+        valid = dt > 0
+        if not np.all(valid):
+            keep_idx = np.insert(valid, 0, True)
+            xs, ys, ts = xs[keep_idx], ys[keep_idx], ts[keep_idx]
+            if len(xs) < 2:
+                continue
+            dt = np.diff(ts)
+
+        coords = np.column_stack([xs, ys])
+        steps = np.diff(coords, axis=0)
+        d = np.hypot(steps[:, 0], steps[:, 1])
+        v = d / np.maximum(dt, 1e-6)
+
+        w = int(max(5, params.window_size if params.window_size % 2 == 1 else params.window_size + 1))
+        pad = w // 2
+        v_pad = np.pad(v, (pad, pad), mode="edge")
+        v2 = pd.Series(v_pad).rolling(window=w, center=True, min_periods=max(5, w // 3)).var().to_numpy()[pad:-pad]
+        if len(v2) != len(v):
+            v2 = np.resize(v2, len(v))
+        baseline_var_v = (params.raster_resolution_m / 5.0) ** 2
+        v2 = np.where(np.isfinite(v2) & (v2 > 0), v2, baseline_var_v)
+
+        res = float(params.raster_resolution_m)
+        buf = float(params.buffer_m)
+        minx, maxx = float(np.min(xs) - buf), float(np.max(xs) + buf)
+        miny, maxy = float(np.min(ys) - buf), float(np.max(ys) + buf)
+        width = int(max(1, math.ceil((maxx - minx) / res)))
+        height = int(max(1, math.ceil((maxy - miny) / res)))
+        transform = Affine.translation(minx, maxy) * Affine.scale(res, -res)
+
+        def world_to_cr(x, y):
+            c = (x - minx) / res
+            r = (maxy - y) / res
+            return c, r
+
+        UD = np.zeros((height, width), dtype=np.float64)
+        cell_area = res * res
+
+        nseg = len(steps)
+        n_sub = int(max(5, params.n_substeps))
+        loc_err2 = float(params.location_error_m) ** 2
+
+        for i in range(nseg):
+            x0, y0 = coords[i]
+            x1, y1 = coords[i + 1]
+            Ti = max(dt[i], 1e-3)
+            sig2 = max(v2[i], (params.raster_resolution_m / 10.0) ** 2)
+
+            seg_len = max(1.0, np.hypot(x1 - x0, y1 - y0))
+            sigma_max = math.sqrt(loc_err2 + sig2 * (0.25 * Ti))
+            radius = 3.0 * (sigma_max + 0.5 * seg_len)
+            minx_w = min(x0, x1) - radius
+            maxx_w = max(x0, x1) + radius
+            miny_w = min(y0, y1) - radius
+            maxy_w = max(y0, y1) + radius
+
+            c0f, r_topf = world_to_cr(minx_w, maxy_w)
+            c1f, r_botf = world_to_cr(maxx_w, miny_w)
+
+            c0 = int(max(0, math.floor(min(c0f, c1f))))
+            c1 = int(min(width - 1, math.ceil(max(c0f, c1f))))
+            r0 = int(max(0, math.floor(min(r_topf, r_botf))))
+            r1 = int(min(height - 1, math.ceil(max(r_topf, r_botf))))
+            if r1 < r0 or c1 < c0:
+                continue
+
+            ss = np.linspace(0.0, 1.0, n_sub, endpoint=True)
+            xs_sub = x0 + ss * (x1 - x0)
+            ys_sub = y0 + ss * (y1 - y0)
+
+            rows = np.arange(r0, r1 + 1)
+            cols = np.arange(c0, c1 + 1)
+            if rows.size == 0 or cols.size == 0:
+                continue
+
+            xx = minx + (cols + 0.5) * res
+            yy = maxy - (rows + 0.5) * res
+            XX, YY = np.meshgrid(xx, yy)
+
+            for x_s, y_s, s in zip(xs_sub, ys_sub, ss):
+                var_s = loc_err2 + sig2 * (s * (1.0 - s) * Ti)
+                if var_s <= 0:
+                    continue
+                dx = XX - x_s
+                dy = YY - y_s
+                kernel = np.exp(-(dx * dx + dy * dy) / (2.0 * var_s)) / (2.0 * math.pi * var_s)
+                UD[rows[:, None], cols[None, :]] += kernel
+
+        total = float(UD.sum() * cell_area)
+        if total <= 0:
+            continue
+        UD /= total
+
+        tif_path = os.path.join(OUTPUT_DIR, f"dbbmm_{str(animal).replace(' ', '_')}.tif")
+        with rasterio.open(
+            tif_path,
+            "w",
+            driver="GTiff",
+            height=UD.shape[0],
+            width=UD.shape[1],
+            count=1,
+            dtype=rasterio.float32,
+            crs="EPSG:3857",
+            transform=transform,
+            compress="lzw",
+        ) as dst:
+            dst.write(UD.astype(np.float32), 1)
+
+        flat = UD.ravel()
+        order = np.argsort(flat)[::-1]
+        flat_sorted = flat[order]
+        mass = np.cumsum(flat_sorted * cell_area)
+        total_mass = float(mass[-1]) if len(mass) else 0.0
+
+        isopleths = []
+        if total_mass > 0:
+            for p in sorted(set(int(x) for x in params.isopleths if 1 <= int(x) <= 100)):
+                target = (p / 100.0) * total_mass
+                idx = int(np.searchsorted(mass, target, side="left"))
+                thr = float(flat_sorted[min(idx, len(flat_sorted) - 1)])
+                mask = (UD >= thr).astype(np.uint8)
+
+                polygons = []
+                for geom, val in rio_shapes(mask, mask=mask.astype(bool), transform=transform):
+                    if val != 1:
+                        continue
+                    poly = shp_shape(geom)
+                    if not poly.is_empty and poly.area > 0:
+                        polygons.append(poly)
+                if not polygons:
+                    continue
+
+                mp = unary_union(polygons)
+                if isinstance(mp, (Polygon, MultiPolygon)):
+                    isopleths.append({
+                        "percent": int(p),
+                        "area_sq_km": float(mp.area / 1e6),
+                        "geometry": shp_mapping(reproj_geom(mp)),
+                    })
+
+        results[str(animal)] = {"geotiff": tif_path, "isopleths": isopleths}
+
+    return results
+
+
+results = compute_dbbmm(df, params=PARAMS)
+rows = []
+index = {"animals": {}}
+features_all = []
+
+for animal, data in results.items():
+    index["animals"][animal] = {"geotiff": data.get("geotiff"), "isopleths": []}
+    for item in data.get("isopleths", []) or []:
+        percent = int(item.get("percent"))
+        area = float(item.get("area_sq_km", 0.0))
+        index["animals"][animal]["isopleths"].append({"percent": percent, "area_km2": area})
+        rows.append((animal, f"dBBMM-{percent}", area))
+        if item.get("geometry"):
+            features_all.append({
+                "type": "Feature",
+                "properties": {"animal_id": str(animal), "percent": percent, "area_km2": area},
+                "geometry": item["geometry"],
+            })
+
+if rows:
+    areas = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"]).sort_values(["animal_id", "type"])
+    areas.to_csv(os.path.join(OUTPUT_DIR, "home_range_areas.csv"), index=False)
+
+if index["animals"]:
+    with open(os.path.join(OUTPUT_DIR, "dbbmm_index.json"), "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2)
+
+if features_all:
+    with open(os.path.join(OUTPUT_DIR, "dbbmms_all.geojson"), "w", encoding="utf-8") as f:
+        json.dump({"type": "FeatureCollection", "features": features_all}, f)
+
+archive_path = os.path.join(OUTPUT_DIR, "spatchat_results.zip")
+if os.path.exists(archive_path):
+    os.remove(archive_path)
+with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+    for root, _, files in os.walk(OUTPUT_DIR):
+        for file in files:
+            if file.endswith(".zip"):
+                continue
+            full_path = os.path.join(root, file)
+            rel_path = os.path.relpath(full_path, OUTPUT_DIR)
+            zipf.write(full_path, arcname=rel_path)
+
+print(f"dBBMM outputs written to: {OUTPUT_DIR}")
+print(f"Zip archive: {archive_path}")

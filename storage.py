@@ -1,122 +1,257 @@
 # storage.py
+import contextvars
+import json
 import os
 import shutil
-import json
 import zipfile
+from collections.abc import MutableMapping, MutableSet
+
 import pandas as pd
-from collections import defaultdict
 from shapely.geometry import mapping
 
-# ---- Global analysis state (shared across modules) ----
-# MCP: {animal_id: {percent: {"polygon": shapely.Polygon, "area": float}}}
-mcp_results = {}
 
-# KDE: {animal_id: {percent: {"contour": shapely (Multi)Polygon or None,
-#                             "area": float,
-#                             "geotiff": str (path),
-#                             "geojson": str (optional path)}}}
-kde_results = {}
+_CURRENT_SESSION = contextvars.ContextVar("spatchat_hr_session", default="__default__")
+_SESSION_STATE: dict[str, dict] = {}
 
-# LoCoH: full result dict from estimators/locoh.compute_locoh(...)
-# {
-#   "method": "k"|"a"|"r",
-#   "isopleths": [50,95,...],
-#   "animals": {
-#       "<animal_id>": {
-#           "n_points": int,
-#           "isopleths": [
-#               {"isopleth": 50, "area_sq_km": float, "geometry": <GeoJSON>},
-#               ...
-#           ],
-#           "facets": [
-#               {"cum_percent": 50, "area_sq_km": float, "geometry": <GeoJSON>},
-#               ...
-#           ]
-#       }, ...
-#   }
-# }
-locoh_results = None  # or dict
 
-# dBBMM: {animal_id: {"geotiff": str, "isopleths": [{percent, area_sq_km, geometry}]}}
-dbbmm_results = {}
+def _new_state() -> dict:
+    return {
+        "mcp_results": {},
+        "kde_results": {},
+        "akde_results": {},
+        "locoh_results": None,
+        "dbbmm_results": {},
+        "requested_percents": set(),
+        "requested_kde_percents": set(),
+        "requested_akde_percents": set(),
+        "requested_dbbmm_percents": set(),
+        "cached_df": None,
+        "cached_headers": [],
+        "last_detection_summary": "",
+        "output_dir": "outputs",
+        "repro_manifest": {
+            "mcp": {"percents": []},
+            "kde": {"percents": [], "params": {}},
+            "akde": {"percents": [], "params": {}},
+            "locoh": {"requested": False, "params": {}},
+            "dbbmm": {"percents": [], "params": {}},
+            "movement": {
+                "displacement": False,
+                "step_lengths": False,
+                "turning_angles": False,
+                "autocorrelation": False,
+                "hmm": False,
+                "states": 3,
+            },
+        },
+    }
 
-# requested sets (kept for UI and summaries)
-requested_percents = set()        # MCP
-requested_kde_percents = set()    # KDE
-requested_dbbmm_percents = set()  # dBBMM
 
-# Cached dataset and headers
-cached_df = None
-cached_headers = []
+def _state() -> dict:
+    key = _CURRENT_SESSION.get()
+    if key not in _SESSION_STATE:
+        _SESSION_STATE[key] = _new_state()
+    return _SESSION_STATE[key]
 
-# --- transient detection summary for chat ---
-last_detection_summary = ""
 
-# ---- Accessors expected by app.py ----
+def set_current_session(session_id: str | None) -> None:
+    _CURRENT_SESSION.set((session_id or "__default__").strip() or "__default__")
+    _state()
+
+
+def delete_session(session_id: str | None) -> None:
+    sid = (session_id or "").strip()
+    if not sid or sid == "__default__":
+        return
+    _SESSION_STATE.pop(sid, None)
+    if _CURRENT_SESSION.get() == sid:
+        _CURRENT_SESSION.set("__default__")
+
+
+def set_output_dir(path: str | None) -> None:
+    state = _state()
+    state["output_dir"] = path or "outputs"
+
+
+def get_output_dir() -> str:
+    return _state().get("output_dir") or "outputs"
+
+
+def get_repro_manifest() -> dict:
+    manifest = _state().get("repro_manifest")
+    if not isinstance(manifest, dict):
+        manifest = _new_state()["repro_manifest"]
+        _state()["repro_manifest"] = manifest
+    return manifest
+
+
+def set_repro_manifest(manifest: dict | None) -> None:
+    _state()["repro_manifest"] = manifest if isinstance(manifest, dict) else _new_state()["repro_manifest"]
+
+
+class _SessionDictProxy(MutableMapping):
+    def __init__(self, key: str):
+        self.key = key
+
+    def _target(self) -> dict:
+        return _state()[self.key]
+
+    def __getitem__(self, item):
+        return self._target()[item]
+
+    def __setitem__(self, item, value):
+        self._target()[item] = value
+
+    def __delitem__(self, item):
+        del self._target()[item]
+
+    def __iter__(self):
+        return iter(self._target())
+
+    def __len__(self):
+        return len(self._target())
+
+    def clear(self):
+        self._target().clear()
+
+    def update(self, *args, **kwargs):
+        self._target().update(*args, **kwargs)
+
+    def copy(self):
+        return self._target().copy()
+
+    def items(self):
+        return self._target().items()
+
+    def keys(self):
+        return self._target().keys()
+
+    def values(self):
+        return self._target().values()
+
+    def __contains__(self, item):
+        return item in self._target()
+
+    def __repr__(self):
+        return repr(self._target())
+
+
+class _SessionSetProxy(MutableSet):
+    def __init__(self, key: str):
+        self.key = key
+
+    def _target(self) -> set:
+        return _state()[self.key]
+
+    def __contains__(self, item):
+        return item in self._target()
+
+    def __iter__(self):
+        return iter(self._target())
+
+    def __len__(self):
+        return len(self._target())
+
+    def add(self, value):
+        self._target().add(value)
+
+    def discard(self, value):
+        self._target().discard(value)
+
+    def clear(self):
+        self._target().clear()
+
+    def update(self, *others):
+        self._target().update(*others)
+
+    def copy(self):
+        return self._target().copy()
+
+    def __repr__(self):
+        return repr(self._target())
+
+
+mcp_results = _SessionDictProxy("mcp_results")
+kde_results = _SessionDictProxy("kde_results")
+akde_results = _SessionDictProxy("akde_results")
+dbbmm_results = _SessionDictProxy("dbbmm_results")
+requested_percents = _SessionSetProxy("requested_percents")
+requested_kde_percents = _SessionSetProxy("requested_kde_percents")
+requested_akde_percents = _SessionSetProxy("requested_akde_percents")
+requested_dbbmm_percents = _SessionSetProxy("requested_dbbmm_percents")
+
+
 def get_cached_df():
-    return cached_df
+    return _state()["cached_df"]
+
 
 def set_cached_df(df):
-    global cached_df
-    cached_df = df
+    _state()["cached_df"] = df
+
 
 def get_cached_headers():
-    return cached_headers
+    return list(_state()["cached_headers"])
+
 
 def set_cached_headers(headers):
-    global cached_headers
-    cached_headers = list(headers or [])
+    _state()["cached_headers"] = list(headers or [])
+
 
 def set_detection_summary(text: str):
-    global last_detection_summary
-    last_detection_summary = text or ""
+    _state()["last_detection_summary"] = text or ""
+
 
 def get_detection_summary() -> str:
-    return last_detection_summary
+    return _state()["last_detection_summary"]
+
 
 def get_locoh_results():
-    return locoh_results
+    return _state()["locoh_results"]
+
 
 def set_locoh_results(res: dict | None):
-    global locoh_results
-    locoh_results = res
+    _state()["locoh_results"] = res
+
 
 def get_dbbmm_results():
     return dbbmm_results
+
 
 def set_dbbmm_results(res: dict | None):
     dbbmm_results.clear()
     if isinstance(res, dict):
         dbbmm_results.update(res)
 
-# ---- Lifecycle helpers ----
+
+def get_akde_results():
+    return akde_results
+
+
+def set_akde_results(res: dict | None):
+    akde_results.clear()
+    if isinstance(res, dict):
+        akde_results.update(res)
+
+
 def clear_all_results():
-    """
-    Reset analysis outputs and the outputs/ folder WITHOUT rebinding globals.
-    This preserves references imported elsewhere (e.g., in app.py).
-    """
     mcp_results.clear()
     kde_results.clear()
+    akde_results.clear()
     dbbmm_results.clear()
     requested_percents.clear()
     requested_kde_percents.clear()
+    requested_akde_percents.clear()
     requested_dbbmm_percents.clear()
+    _state()["locoh_results"] = None
+    _state()["repro_manifest"] = _new_state()["repro_manifest"]
 
-    global locoh_results
-    locoh_results = None
+    outdir = get_output_dir()
+    if os.path.exists(outdir):
+        shutil.rmtree(outdir)
+    os.makedirs(outdir, exist_ok=True)
 
-    if os.path.exists("outputs"):
-        shutil.rmtree("outputs")
-    os.makedirs("outputs", exist_ok=True)
 
-# --------------------------------------------------------------------------------------
-# Estimator-specific writers (consolidated outputs only)
-# --------------------------------------------------------------------------------------
 def _write_mcp_assets(rows_accum: list[tuple], outdir: str):
-    """
-    rows_accum += (animal_id, 'MCP-<percent>', area_km2)
-    Writes a single merged GeoJSON for all MCP polygons if present.
-    """
     features = []
     for animal, percents in mcp_results.items():
         for percent, v in percents.items():
@@ -131,24 +266,14 @@ def _write_mcp_assets(rows_accum: list[tuple], outdir: str):
                 })
 
     if features:
-        fc = {"type": "FeatureCollection", "features": features}
-        with open(os.path.join(outdir, "mcps_all.geojson"), "w") as f:
-            json.dump(fc, f)
+        with open(os.path.join(outdir, "mcps_all.geojson"), "w", encoding="utf-8") as f:
+            json.dump({"type": "FeatureCollection", "features": features}, f)
+
 
 def _write_kde_assets(rows_accum: list[tuple], outdir: str):
-    """
-    rows_accum += (animal_id, 'KDE-<percent>', area_km2)
-    Writes consolidated files only:
-      - kde_index.json (areas + pointers to rasters/contours)
-      - kdes_all.geojson (ALL animals × isopleths, if geometries are available)
-    Falls back to in-memory shapely contours if per-animal GeoJSON paths are absent.
-    """
     index = {"animals": {}}
     any_kde = False
-
-    # Accumulator for consolidated output
     features_all = []
-    # NEW: track per-animal GeoJSONs we ingest so we can delete them after consolidation
     to_delete_paths = set()
     outdir_abs = os.path.abspath(outdir)
 
@@ -164,18 +289,16 @@ def _write_kde_assets(rows_accum: list[tuple], outdir: str):
                 "geojson": v.get("geojson"),
             }
 
-            # Prefer existing GeoJSON path if present; else serialize contour geometry
             feat_list = []
             gj_path = v.get("geojson")
             if gj_path and os.path.exists(gj_path):
                 try:
-                    with open(gj_path, "r") as f:
+                    with open(gj_path, "r", encoding="utf-8") as f:
                         gj = json.load(f)
                     if isinstance(gj, dict) and gj.get("type") == "FeatureCollection":
                         feat_list = gj.get("features", []) or []
                     elif isinstance(gj, dict) and gj.get("type") == "Feature":
                         feat_list = [gj]
-                    # Mark for deletion only if it's inside outputs/
                     gj_abs = os.path.abspath(gj_path)
                     if gj_abs.startswith(outdir_abs + os.sep):
                         to_delete_paths.add(gj_abs)
@@ -186,15 +309,10 @@ def _write_kde_assets(rows_accum: list[tuple], outdir: str):
                 contour = v.get("contour")
                 if contour is not None:
                     try:
-                        feat_list = [{
-                            "type": "Feature",
-                            "properties": {},
-                            "geometry": mapping(contour),
-                        }]
+                        feat_list = [{"type": "Feature", "properties": {}, "geometry": mapping(contour)}]
                     except Exception:
                         feat_list = []
 
-            # Normalize properties and accumulate
             for feat in feat_list:
                 if not isinstance(feat, dict):
                     continue
@@ -205,49 +323,105 @@ def _write_kde_assets(rows_accum: list[tuple], outdir: str):
                 features_all.append(feat)
 
     if any_kde:
-        with open(os.path.join(outdir, "kde_index.json"), "w") as f:
+        with open(os.path.join(outdir, "kde_index.json"), "w", encoding="utf-8") as f:
             json.dump(index, f, indent=2)
 
     if features_all:
-        fc_all = {"type": "FeatureCollection", "features": features_all}
-        with open(os.path.join(outdir, "kdes_all.geojson"), "w") as f:
-            json.dump(fc_all, f)
-
-        # NEW: remove per-animal KDE GeoJSONs we ingested so they won't be zipped
+        with open(os.path.join(outdir, "kdes_all.geojson"), "w", encoding="utf-8") as f:
+            json.dump({"type": "FeatureCollection", "features": features_all}, f)
         for p in sorted(to_delete_paths):
             try:
                 os.remove(p)
             except OSError:
                 pass
 
+
+def _write_akde_assets(rows_accum: list[tuple], outdir: str):
+    index = {"animals": {}}
+    any_akde = False
+    features_all = []
+    to_delete_paths = set()
+    outdir_abs = os.path.abspath(outdir)
+
+    for animal, percents in akde_results.items():
+        index["animals"][animal] = {}
+        for percent, v in percents.items():
+            any_akde = True
+            area = float(v.get("area", 0.0))
+            rows_accum.append((animal, f"AKDE-{percent}", area))
+            index["animals"][animal][str(percent)] = {
+                "area_km2": area,
+                "geotiff": v.get("geotiff"),
+                "geojson": v.get("geojson"),
+                "meta": v.get("meta"),
+            }
+
+            feat_list = []
+            gj_path = v.get("geojson")
+            if gj_path and os.path.exists(gj_path):
+                try:
+                    with open(gj_path, "r", encoding="utf-8") as f:
+                        gj = json.load(f)
+                    if isinstance(gj, dict) and gj.get("type") == "FeatureCollection":
+                        feat_list = gj.get("features", []) or []
+                    elif isinstance(gj, dict) and gj.get("type") == "Feature":
+                        feat_list = [gj]
+                    else:
+                        feat_list = [{"type": "Feature", "properties": {}, "geometry": gj}]
+                    gj_abs = os.path.abspath(gj_path)
+                    if gj_abs.startswith(outdir_abs + os.sep):
+                        to_delete_paths.add(gj_abs)
+                except Exception:
+                    feat_list = []
+
+            if not feat_list:
+                contour = v.get("contour")
+                if contour is not None:
+                    try:
+                        feat_list = [{"type": "Feature", "properties": {}, "geometry": mapping(contour)}]
+                    except Exception:
+                        feat_list = []
+
+            for feat in feat_list:
+                if not isinstance(feat, dict):
+                    continue
+                props = feat.setdefault("properties", {})
+                props["animal_id"] = str(animal)
+                props["percent"] = int(percent)
+                props["area_km2"] = area
+                features_all.append(feat)
+
+    if any_akde:
+        with open(os.path.join(outdir, "akde_index.json"), "w", encoding="utf-8") as f:
+            json.dump(index, f, indent=2)
+
+    if features_all:
+        with open(os.path.join(outdir, "akdes_all.geojson"), "w", encoding="utf-8") as f:
+            json.dump({"type": "FeatureCollection", "features": features_all}, f)
+        for p in sorted(to_delete_paths):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
-    """
-    rows_accum += (animal_id, 'LoCoH-<isopleth>', area_km2)
-    Writes consolidated files only:
-      - locoh_results.json               (full object: envelopes + facets)
-      - locoh_envelopes_all.geojson      (ALL animals × isopleths)
-      - locoh_facets_all.geojson         (ALL animals facets)
-    """
-    if not locoh_results or not isinstance(locoh_results, dict):
+    locoh_result = get_locoh_results()
+    if not locoh_result or not isinstance(locoh_result, dict):
         return
 
-    # Full results (for reproducibility/programmatic use)
-    with open(os.path.join(outdir, "locoh_results.json"), "w") as f:
-        json.dump(locoh_results, f)
+    with open(os.path.join(outdir, "locoh_results.json"), "w", encoding="utf-8") as f:
+        json.dump(locoh_result, f)
 
-    animals = (locoh_results.get("animals") or {})
-
-    # Accumulators for consolidated files
-    envelope_features = []   # all animals×isopleths
-    facets_features = []     # all animals facets
+    animals = (locoh_result.get("animals") or {})
+    envelope_features = []
+    facets_features = []
 
     for animal_id, data in animals.items():
-        # Envelopes (single-piece per isopleth)
         for item in data.get("isopleths", []):
             iso = int(item.get("isopleth"))
             area = float(item.get("area_sq_km", 0.0))
             rows_accum.append((animal_id, f"LoCoH-{iso}", area))
-
             gj = item.get("geometry")
             if gj:
                 envelope_features.append({
@@ -256,7 +430,6 @@ def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
                     "geometry": gj,
                 })
 
-        # Facets (tiny hulls; many features)
         for fct in (data.get("facets") or []):
             facets_features.append({
                 "type": "Feature",
@@ -268,32 +441,22 @@ def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
                 "geometry": fct.get("geometry"),
             })
 
-    # Consolidated files
     if envelope_features:
-        fc_env_all = {"type": "FeatureCollection", "features": envelope_features}
-        with open(os.path.join(outdir, "locoh_envelopes_all.geojson"), "w") as f:
-            json.dump(fc_env_all, f)
+        with open(os.path.join(outdir, "locoh_envelopes_all.geojson"), "w", encoding="utf-8") as f:
+            json.dump({"type": "FeatureCollection", "features": envelope_features}, f)
 
     if facets_features:
-        fc_fac_all = {"type": "FeatureCollection", "features": facets_features}
-        with open(os.path.join(outdir, "locoh_facets_all.geojson"), "w") as f:
-            json.dump(fc_fac_all, f)
+        with open(os.path.join(outdir, "locoh_facets_all.geojson"), "w", encoding="utf-8") as f:
+            json.dump({"type": "FeatureCollection", "features": facets_features}, f)
+
 
 def _write_dbbmm_assets(rows_accum: list[tuple], outdir: str):
-    """
-    rows_accum += (animal_id, 'dBBMM-<percent>', area_km2)
-    Writes consolidated files only:
-      - dbbmm_index.json      (areas + pointers)
-      - dbbmms_all.geojson    (ALL animals × isopleths)
-    """
     index = {"animals": {}}
     any_bb = False
     features_all = []
 
     for animal, data in dbbmm_results.items():
         any_bb = True
-
-        # Accept dict or DBBMMResult dataclass
         if isinstance(data, dict):
             geotiff = data.get("geotiff")
             iso_list = data.get("isopleths", []) or []
@@ -302,13 +465,11 @@ def _write_dbbmm_assets(rows_accum: list[tuple], outdir: str):
             iso_list = getattr(data, "isopleths", []) or []
 
         index["animals"][animal] = {"geotiff": geotiff, "isopleths": []}
-
         for item in iso_list:
             p = int(item.get("percent"))
             area = float(item.get("area_sq_km", 0.0))
             index["animals"][animal]["isopleths"].append({"percent": p, "area_km2": area})
             rows_accum.append((animal, f"dBBMM-{p}", area))
-
             gj = item.get("geometry")
             if gj:
                 features_all.append({
@@ -318,45 +479,30 @@ def _write_dbbmm_assets(rows_accum: list[tuple], outdir: str):
                 })
 
     if any_bb:
-        with open(os.path.join(outdir, "dbbmm_index.json"), "w") as f:
+        with open(os.path.join(outdir, "dbbmm_index.json"), "w", encoding="utf-8") as f:
             json.dump(index, f, indent=2)
 
     if features_all:
-        fc_all = {"type": "FeatureCollection", "features": features_all}
-        with open(os.path.join(outdir, "dbbmms_all.geojson"), "w") as f:
-            json.dump(fc_all, f)
+        with open(os.path.join(outdir, "dbbmms_all.geojson"), "w", encoding="utf-8") as f:
+            json.dump({"type": "FeatureCollection", "features": features_all}, f)
 
-# --------------------------------------------------------------------------------------
-# Orchestrator
-# --------------------------------------------------------------------------------------
+
 def save_all_mcps_zip():
-    """
-    Writes (under ./outputs):
-      - mcps_all.geojson
-      - kde_index.json, kdes_all.geojson
-      - locoh_results.json, locoh_envelopes_all.geojson, locoh_facets_all.geojson
-      - dbbmm_index.json, dbbmms_all.geojson
-      - home_range_areas.csv
-      - spatchat_results.zip              (zip of everything in outputs/)
-    Returns path to the zip.
-    """
-    os.makedirs("outputs", exist_ok=True)
+    outdir = get_output_dir()
+    os.makedirs(outdir, exist_ok=True)
     rows: list[tuple] = []
-    outdir = "outputs"
 
-    # Per-estimator writers (consolidated only)
     _write_mcp_assets(rows, outdir)
     _write_kde_assets(rows, outdir)
+    _write_akde_assets(rows, outdir)
     _write_locoh_assets(rows, outdir)
     _write_dbbmm_assets(rows, outdir)
 
-    # Areas CSV (one table for all estimators)
     if rows:
         df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
         df.sort_values(["animal_id", "type"], inplace=True)
         df.to_csv(os.path.join(outdir, "home_range_areas.csv"), index=False)
 
-    # Zip everything in outputs/
     archive = os.path.join(outdir, "spatchat_results.zip")
     if os.path.exists(archive):
         os.remove(archive)

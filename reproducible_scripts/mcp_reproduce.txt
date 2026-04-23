@@ -1,0 +1,104 @@
+# Standalone reproducibility script for SpatChat MCP outputs
+# Install requirements first:
+#   pip install pandas numpy shapely pyproj scipy
+# Rename this file to .py if you want to run it directly.
+#
+# USER ARGUMENTS:
+# - INPUT_CSV: by default uses bundled input_data.csv in this folder.
+# - OUTPUT_DIR: where reproduced outputs will be written.
+# - PERCENTS: MCP levels to reproduce. By default these come from repro_config.json.
+
+import json
+import os
+import zipfile
+
+import numpy as np
+import pandas as pd
+from pyproj import Transformer
+from scipy.spatial import ConvexHull
+from shapely.geometry import Polygon, mapping
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+INPUT_CSV = os.path.join(SCRIPT_DIR, "input_data.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs")
+
+CONFIG = {}
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        CONFIG = json.load(f)
+
+PERCENTS = CONFIG.get("mcp", {}).get("percents", [95])
+
+if not os.path.exists(INPUT_CSV):
+    raise FileNotFoundError(f"Bundled input data not found: {INPUT_CSV}")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+df = pd.read_csv(INPUT_CSV)
+required = {"animal_id", "longitude", "latitude"}
+missing = sorted(required - set(df.columns))
+if missing:
+    raise ValueError(f"Bundled input_data.csv is missing required columns: {missing}")
+
+
+def mcp_polygon(latitudes, longitudes, percent=95):
+    pts = np.column_stack((longitudes, latitudes))
+    if len(pts) < 3:
+        return None
+    centroid = pts.mean(axis=0)
+    dists = np.linalg.norm(pts - centroid, axis=1)
+    n_keep = max(3, int(len(pts) * (percent / 100.0)))
+    keep_idx = np.argsort(dists)[:n_keep]
+    pts_kept = pts[keep_idx]
+    if len(pts_kept) < 3:
+        return None
+    hull = ConvexHull(pts_kept)
+    return pts_kept[hull.vertices]
+
+
+rows = []
+features = []
+
+for percent in PERCENTS:
+    for animal in df["animal_id"].astype(str).unique():
+        track = df[df["animal_id"].astype(str) == animal]
+        hp = mcp_polygon(track["latitude"].values, track["longitude"].values, percent)
+        if hp is None:
+            continue
+        poly = Polygon([(lon, lat) for lon, lat in hp])
+
+        tf = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
+        coords_proj = [tf.transform(lon, lat) for lon, lat in hp]
+        poly_proj = Polygon(coords_proj)
+        area_km2 = float(poly_proj.area / 1e6)
+
+        rows.append((animal, f"MCP-{percent}", area_km2))
+        features.append({
+            "type": "Feature",
+            "properties": {"animal_id": str(animal), "percent": int(percent), "area_km2": area_km2},
+            "geometry": mapping(poly),
+        })
+
+if rows:
+    areas = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"]).sort_values(["animal_id", "type"])
+    areas.to_csv(os.path.join(OUTPUT_DIR, "home_range_areas.csv"), index=False)
+
+if features:
+    with open(os.path.join(OUTPUT_DIR, "mcps_all.geojson"), "w", encoding="utf-8") as f:
+        json.dump({"type": "FeatureCollection", "features": features}, f)
+
+archive_path = os.path.join(OUTPUT_DIR, "spatchat_results.zip")
+if os.path.exists(archive_path):
+    os.remove(archive_path)
+with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+    for root, _, files in os.walk(OUTPUT_DIR):
+        for file in files:
+            if file.endswith(".zip"):
+                continue
+            full_path = os.path.join(root, file)
+            rel_path = os.path.relpath(full_path, OUTPUT_DIR)
+            zipf.write(full_path, arcname=rel_path)
+
+print(f"MCP outputs written to: {OUTPUT_DIR}")
+print(f"Zip archive: {archive_path}")

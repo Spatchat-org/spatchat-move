@@ -1,0 +1,61 @@
+# Standalone reproducibility script for SpatChat step-length analysis
+# Install requirements first:
+#   pip install pandas numpy matplotlib pyproj
+# Rename this file to .py if you want to run it directly.
+
+import os
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from movement_common import build_track_metrics, ensure_output_dir, summarize_numeric
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+INPUT_CSV = os.path.join(SCRIPT_DIR, "input_data.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs")
+
+if not os.path.exists(INPUT_CSV):
+    raise FileNotFoundError(f"Bundled input data not found: {INPUT_CSV}")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+df = pd.read_csv(INPUT_CSV)
+metrics = build_track_metrics(df)
+steps = metrics.dropna(subset=["step_length_m"]).copy()
+if steps.empty:
+    raise ValueError("At least two fixes per track are required for step-length analysis.")
+
+outdir = ensure_output_dir(OUTPUT_DIR, "movement_analysis")
+steps.to_csv(os.path.join(outdir, "step_lengths.csv"), index=False)
+
+summary_rows = []
+for animal_id, group in steps.groupby("animal_id", dropna=False):
+    stats = summarize_numeric(group["step_length_m"])
+    summary_rows.append({
+        "animal_id": animal_id,
+        "n_steps": stats["n"],
+        "mean_step_length_m": stats["mean"],
+        "median_step_length_m": stats["median"],
+        "sd_step_length_m": stats["sd"],
+        "max_step_length_m": stats["max"],
+    })
+
+summary = pd.DataFrame(summary_rows).sort_values("animal_id")
+summary.to_csv(os.path.join(outdir, "step_length_summary.csv"), index=False)
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
+for animal_id, group in steps.groupby("animal_id", dropna=False):
+    axes[0].plot(group["obs_index"], group["step_length_m"], label=str(animal_id))
+    axes[1].hist(group["step_length_m"], bins=20, alpha=0.35, label=str(animal_id))
+axes[0].set_title("Step Length by Observation")
+axes[0].set_xlabel("Observation Index")
+axes[0].set_ylabel("Step Length (m)")
+axes[1].set_title("Step Length Distribution")
+axes[1].set_xlabel("Step Length (m)")
+axes[1].set_ylabel("Frequency")
+if steps["animal_id"].nunique() <= 8:
+    axes[0].legend()
+    axes[1].legend()
+fig.savefig(os.path.join(outdir, "step_length_plots.png"), dpi=180)
+plt.close(fig)
+
+print(f"Step-length analysis reproduced in: {outdir}")

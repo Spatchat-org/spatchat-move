@@ -9,7 +9,7 @@ def _parse_epsg_literal(s):
 def _parse_utm_any(s):
     txt = str(s).strip()
     patterns = [
-        r'(?i)\butm\b[^0-9]*?(\d{1,2})\s*([A-Za-z])?',
+        r'(?i)\butm\s*(\d{1,2})\s*([A-Za-z])?\b',
         r'(?i)\bzone\s*(\d{1,2})\s*([A-Za-z])?',
         r'\b(\d{1,2})\s*([C-HJ-NP-Xc-hj-np-x])\b',
         r'\b(\d{1,2})\s*([NnSs])\b',
