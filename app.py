@@ -73,6 +73,14 @@ from datetime import datetime as _dt, date as _date
 # --------------------------------------------------------------------------------------
 # Utilities
 # --------------------------------------------------------------------------------------
+def _component_accepts_kw(component, kw_name: str) -> bool:
+    try:
+        sig = inspect.signature(component)
+    except (TypeError, ValueError):
+        return False
+    return kw_name in sig.parameters
+
+
 def _json_safe(x):
     if isinstance(x, (_np.integer,)):
         return int(x)
@@ -2175,13 +2183,15 @@ window.spatchatFigureViewer = (() => {
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     session_state = gr.State(None)
     figure_state = gr.State([])
-    gr.Image(
-        value="logo_long1.png",
-        show_label=False,
-        buttons=[],
-        type="filepath",
-        elem_id="logo-img"
-    )
+    image_kwargs = {
+        "value": "logo_long1.png",
+        "show_label": False,
+        "type": "filepath",
+        "elem_id": "logo-img",
+    }
+    if _component_accepts_kw(gr.Image, "buttons"):
+        image_kwargs["buttons"] = []
+    gr.Image(**image_kwargs)
     gr.HTML("""
     <style>
     :root {
@@ -3073,15 +3083,18 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
 
     with gr.Row(elem_id="spatchat-workarea"):
         with gr.Column(scale=3, min_width=0, elem_id="spatchat-sidebar"):
-            chatbot = gr.Chatbot(
-                label="SpatChat",
-                show_label=False,
-                layout="panel",
-                buttons=[],
-                feedback_options=None,
-                value=[{"role": "assistant", "content": "Hi, I'm Spatchat! This room helps you analyze home ranges and movement behavior from movement data.\n\nUpload a movement CSV to begin: it should include coordinates, and can also include timestamps and animal IDs for track-aware analyses.\nThis room can:\n- estimate home ranges with MCP, KDE, AKDE, LoCoH, and dBBMM\n- analyze movement patterns using displacement, step lengths, turning angles, and autocorrelation diagnostics\n- identify behavioral states with a hidden Markov model"}],
-                elem_id="spatchat-chatbot"
-            )
+            chatbot_kwargs = {
+                "label": "SpatChat",
+                "show_label": False,
+                "layout": "panel",
+                "value": [{"role": "assistant", "content": "Hi, I'm Spatchat! This room helps you analyze home ranges and movement behavior from movement data.\n\nUpload a movement CSV to begin: it should include coordinates, and can also include timestamps and animal IDs for track-aware analyses.\nThis room can:\n- estimate home ranges with MCP, KDE, AKDE, LoCoH, and dBBMM\n- analyze movement patterns using displacement, step lengths, turning angles, and autocorrelation diagnostics\n- identify behavioral states with a hidden Markov model"}],
+                "elem_id": "spatchat-chatbot",
+            }
+            if _component_accepts_kw(gr.Chatbot, "buttons"):
+                chatbot_kwargs["buttons"] = []
+            if _component_accepts_kw(gr.Chatbot, "feedback_options"):
+                chatbot_kwargs["feedback_options"] = None
+            chatbot = gr.Chatbot(**chatbot_kwargs)
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
             user_input = gr.Textbox(label="", show_label=False, placeholder="Ask Spatchat...", lines=1, elem_id="spatchat-user-input")
             file_input = gr.File(label="Upload Movement CSV (.csv or .txt only)", file_types=[".csv", ".txt"], elem_id="spatchat-file-input")
