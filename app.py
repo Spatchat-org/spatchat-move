@@ -3090,6 +3090,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                 "value": [{"role": "assistant", "content": "Hi, I'm Spatchat! This room helps you analyze home ranges and movement behavior from movement data.\n\nUpload a movement CSV to begin: it should include coordinates, and can also include timestamps and animal IDs for track-aware analyses.\nThis room can:\n- estimate home ranges with MCP, KDE, AKDE, LoCoH, and dBBMM\n- analyze movement patterns using displacement, step lengths, turning angles, and autocorrelation diagnostics\n- identify behavioral states with a hidden Markov model"}],
                 "elem_id": "spatchat-chatbot",
             }
+            if _component_accepts_kw(gr.Chatbot, "type"):
+                chatbot_kwargs["type"] = "messages"
             if _component_accepts_kw(gr.Chatbot, "buttons"):
                 chatbot_kwargs["buttons"] = []
             if _component_accepts_kw(gr.Chatbot, "feedback_options"):
