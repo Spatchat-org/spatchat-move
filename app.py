@@ -821,14 +821,14 @@ def _collect_figure_entries(output_dir: str, akde_data: dict | None = None) -> l
         })
 
     movement_specs = [
-        ("displacement", "Displacement", "Net displacement and cumulative movement", "movement_analysis\\displacement_plots.png"),
-        ("step-lengths", "Step Lengths", "Observation series and distribution", "movement_analysis\\step_length_plots.png"),
-        ("turning-angles", "Turning Angles", "Observation series and distribution", "movement_analysis\\turning_angle_plots.png"),
-        ("autocorrelation", "Autocorrelation", "Step-length and displacement diagnostics", "movement_analysis\\autocorrelation_plots.png"),
-        ("hmm-states", "Behavioral States", "Hidden Markov state assignments and step lengths", "movement_analysis\\hmm_behavior_states.png"),
+        ("displacement", "Displacement", "Net displacement and cumulative movement", ("movement_analysis", "displacement_plots.png")),
+        ("step-lengths", "Step Lengths", "Observation series and distribution", ("movement_analysis", "step_length_plots.png")),
+        ("turning-angles", "Turning Angles", "Observation series and distribution", ("movement_analysis", "turning_angle_plots.png")),
+        ("autocorrelation", "Autocorrelation", "Step-length and displacement diagnostics", ("movement_analysis", "autocorrelation_plots.png")),
+        ("hmm-states", "Behavioral States", "Hidden Markov state assignments and step lengths", ("movement_analysis", "hmm_behavior_states.png")),
     ]
-    for fig_id, title, subtitle, rel_path in movement_specs:
-        add_figure(fig_id, title, subtitle, os.path.join(output_dir, rel_path))
+    for fig_id, title, subtitle, rel_path_parts in movement_specs:
+        add_figure(fig_id, title, subtitle, os.path.join(output_dir, *rel_path_parts))
 
     add_table(
         "home-range-areas",
