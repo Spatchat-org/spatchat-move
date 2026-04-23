@@ -3059,7 +3059,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     }
     </style>
     """)
-    gr.Markdown("## 🏠 SpatChat: Home Range Analysis {hr}  🦊🦉🐢")
+    gr.Markdown("## 🏠 Spatchat: Animal Movement and Home Range Analysis {move}  🦊🦉🐢")
     gr.HTML("""
     <div style="margin-top: -10px; margin-bottom: 15px;">
       <input type="text" value="https://spatchat.org/browse/?room=hr" id="shareLink" readonly style="width: 50%; padding: 5px; background-color: #f8f8f8; color: #222; font-weight: 500; border: 1px solid #ccc; border-radius: 4px;">
@@ -3068,7 +3068,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
       </button>
       <div style="margin-top: 10px; font-size: 14px;">
         <b>Share:</b>
-        <a href="https://twitter.com/intent/tweet?text=Checkout+Spatchat!&url=https://spatchat.org/browse/?room=hr" target="_blank">🐦 Twitter</a> |
+        <a href="https://twitter.com/intent/tweet?text=Checkout+Spatchat!&url=https://spatchat.org/browse/?room=move" target="_blank">🐦 Twitter</a> |
         <a href="https://www.facebook.com/sharer/sharer.php?u=https://spatchat.org/browse/?room=hr" target="_blank">📘 Facebook</a>
       </div>
     </div>
@@ -3077,14 +3077,14 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         <div style="font-size: 14px;">
         © 2025 Ho Yi Wan & Logan Hysen. All rights reserved.<br>
         If you use Spatchat in research, please cite:<br>
-        <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>SpatChat: Home Range Analysis.</i>
+        <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>Spatchat: Animal Movement and Home Range Analysis.</i>
         </div>
     """)
 
     with gr.Row(elem_id="spatchat-workarea"):
         with gr.Column(scale=3, min_width=0, elem_id="spatchat-sidebar"):
             chatbot_kwargs = {
-                "label": "SpatChat",
+                "label": "Spatchat",
                 "show_label": False,
                 "layout": "panel",
                 "value": [{"role": "assistant", "content": "Hi, I'm Spatchat! This room helps you analyze home ranges and movement behavior from movement data.\n\nUpload a movement CSV to begin: it should include coordinates, and can also include timestamps and animal IDs for track-aware analyses.\nThis room can:\n- estimate home ranges with MCP, KDE, AKDE, LoCoH, and dBBMM\n- analyze movement patterns using displacement, step lengths, turning angles, and autocorrelation diagnostics\n- identify behavioral states with a hidden Markov model"}],
