@@ -3069,7 +3069,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
       <div style="margin-top: 10px; font-size: 14px;">
         <b>Share:</b>
         <a href="https://twitter.com/intent/tweet?text=Checkout+Spatchat!&url=https://spatchat.org/browse/?room=move" target="_blank">🐦 Twitter</a> |
-        <a href="https://www.facebook.com/sharer/sharer.php?u=https://spatchat.org/browse/?room=hr" target="_blank">📘 Facebook</a>
+        <a href="https://www.facebook.com/sharer/sharer.php?u=https://spatchat.org/browse/?room=move" target="_blank">📘 Facebook</a>
       </div>
     </div>
     """)
