@@ -2195,7 +2195,12 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.HTML("""
     <style>
     :root {
+        --spatchat-connect-bg: #f6f8fb;
+        --spatchat-chat-text: #131722;
+    }
+    .dark .gradio-container {
         --spatchat-connect-bg: #0b0f19;
+        --spatchat-chat-text: var(--body-text-color, #edf2ff);
     }
     :host,
     html,
@@ -2299,6 +2304,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         font-size: 16px !important;
         height: 56vh !important;
         min-height: 56vh !important;
+        color: var(--spatchat-chat-text) !important;
     }
     #spatchat-chatbot > div,
     #spatchat-chatbot .wrap,
@@ -2325,6 +2331,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot,
     #spatchat-chatbot > div {
         background: var(--spatchat-connect-bg) !important;
+        color: var(--spatchat-chat-text) !important;
         border: none !important;
         box-shadow: none !important;
     }
@@ -2463,6 +2470,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot .flex-wrap.bot {
         background: transparent !important;
         border-bottom-left-radius: var(--radius-md) !important;
+        color: var(--spatchat-chat-text) !important;
     }
     #spatchat-chatbot .flex-wrap.user {
         background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important;
@@ -2528,6 +2536,12 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot .message-row.panel.user-row .user *,
     #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user * {
         text-align: left !important;
+    }
+    #spatchat-chatbot .message-row.panel.bot-row .message,
+    #spatchat-chatbot .message-row.panel.bot-row .message *,
+    #spatchat-chatbot .message-row.panel.bot-row .bot,
+    #spatchat-chatbot .message-row.panel.bot-row .bot * {
+        color: var(--spatchat-chat-text) !important;
     }
     #spatchat-chatbot .message-row.panel.user-row .user > div,
     #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user > div,
