@@ -1552,6 +1552,7 @@ def handle_chat(chat_history, user_message, session_id, figure_state):
                 use_effective_n=True,
                 estimate_velocity_tau=True,
                 smooth=True,
+                cores=_get_int(["cores", "core"], 0),
             )
 
     if has_locoh:
