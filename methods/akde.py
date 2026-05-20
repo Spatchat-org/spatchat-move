@@ -1,86 +1,34 @@
-# Standalone reproducibility script for SpatChat AKDE outputs using the bundled ctmm_py runtime.
-# Install requirements first:
-#   pip install pandas numpy scipy matplotlib rasterio shapely pyproj scikit-image
-# Rename this file to .py if you want to run it directly.
-#
-# USER ARGUMENTS:
-# - INPUT_CSV: by default uses bundled input_data.csv in this folder.
-# - OUTPUT_DIR: where reproduced outputs will be written.
-# - PERCENTS: AKDE levels to reproduce. By default these come from repro_config.json.
-# - PARAMS: AKDE settings. By default these also come from repro_config.json.
-#
-# This script is intentionally self-contained when exported by SpatChat.
-# The export includes a readable sibling ctmm_py/ runtime folder, and this
-# script runs the same AKDE model-selection, AKDE, CI, raster, contour, and
-# variogram export path used by the app.
-
 from __future__ import annotations
 
 import json
 import os
-import sys
-import warnings
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import matplotlib
-matplotlib.use("Agg", force=True)
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import matplotlib
+
+matplotlib.use("Agg", force=True)
+import matplotlib.pyplot as plt
 import rasterio
 from pyproj import CRS, Transformer
 from rasterio.features import shapes as rio_shapes
 from rasterio.transform import from_origin
 from rasterio.warp import Resampling, calculate_default_transform, reproject
+from skimage import measure
 from shapely.geometry import MultiPolygon, Polygon, mapping, shape as shp_shape
 from shapely.ops import transform as shp_transform, unary_union
-from skimage import measure
 
-warnings.filterwarnings("ignore", category=RuntimeWarning)
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
-CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
-INPUT_CSV = os.path.join(SCRIPT_DIR, "input_data.csv")
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-def _find_ctmm_py_runtime() -> str:
-    candidates = [
-        os.path.join(SCRIPT_DIR, "ctmm_py"),
-        os.path.abspath(os.path.join(SCRIPT_DIR, "..", "methods", "ctmm_py")),
-        os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "methods", "ctmm_py")),
-    ]
-    for candidate in candidates:
-        if os.path.exists(os.path.join(candidate, "home_range.py")):
-            parent = os.path.dirname(candidate)
-            if parent not in sys.path:
-                sys.path.insert(0, parent)
-            return candidate
-    raise FileNotFoundError(
-        "ctmm_py runtime not found. Expected the exported reproducible_scripts/ctmm_py folder "
-        "or a repository checkout containing methods/ctmm_py."
-    )
-
-
-_CTMM_PY_ROOT = _find_ctmm_py_runtime()
-
-from ctmm_py.home_range import akde as ctmm_akde
-from ctmm_py.models import ctmm, ctmm_fit, ctmm_guess, ctmm_select
-from ctmm_py.kde import CI_UD
-from ctmm_py.plot_variogram import svf_func
-from ctmm_py.telemetry import as_telemetry
-from ctmm_py.types import Telemetry
-from ctmm_py.variogram import variogram
-
-CONFIG = {}
-if os.path.exists(CONFIG_PATH):
-    with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
-        CONFIG = json.load(f)
-
-PERCENTS = [int(x) for x in CONFIG.get("akde", {}).get("percents", [95])]
+import storage
+from methods.ctmm_py.home_range import akde as ctmm_akde
+from methods.ctmm_py.models import ctmm, ctmm_fit, ctmm_guess, ctmm_select
+from methods.ctmm_py.kde import CI_UD
+from methods.ctmm_py.plot_variogram import svf_func
+from methods.ctmm_py.telemetry import as_telemetry
+from methods.ctmm_py.types import Telemetry
+from methods.ctmm_py.variogram import variogram
 
 
 @dataclass
@@ -102,32 +50,37 @@ class AKDEParams:
     cores: int = 0
 
 
-PARAMS_RAW = CONFIG.get("akde", {}).get("params", {}) or {}
-PARAMS = AKDEParams(
-    bandwidth_m=float(PARAMS_RAW["bandwidth_m"]) if PARAMS_RAW.get("bandwidth_m") is not None else None,
-    grid_res_m=float(PARAMS_RAW["grid_res_m"]) if PARAMS_RAW.get("grid_res_m") is not None else None,
-    grid_size=int(PARAMS_RAW.get("grid_size", 200)),
-    extent_buffer_mult=float(PARAMS_RAW.get("extent_buffer_mult", 3.0)),
-    min_points=int(PARAMS_RAW.get("min_points", 15)),
-    variogram_fast=bool(PARAMS_RAW.get("variogram_fast", True)),
-    variogram_res=int(PARAMS_RAW.get("variogram_res", 1)),
-    variogram_dt=float(PARAMS_RAW["variogram_dt"]) if PARAMS_RAW.get("variogram_dt") is not None else None,
-    model=str(PARAMS_RAW.get("model", "auto")),
-    use_effective_n=bool(PARAMS_RAW.get("use_effective_n", True)),
-    estimate_velocity_tau=bool(PARAMS_RAW.get("estimate_velocity_tau", True)),
-    smooth=bool(PARAMS_RAW.get("smooth", True)),
-    debias_area=bool(PARAMS_RAW.get("debias_area", True)),
-    debias_strength=float(PARAMS_RAW.get("debias_strength", 0.22)),
-    cores=int(PARAMS_RAW.get("cores", 0)),
-)
-
-if not os.path.exists(INPUT_CSV):
-    raise FileNotFoundError(f"Bundled input data not found: {INPUT_CSV}")
-
-
 def _safe_name(value) -> str:
     safe = str(value).strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
     return safe or "animal"
+
+
+def _pick_model(params: AKDEParams):
+    model = str(params.model or "auto").lower()
+    if model == "ouf":
+        return ctmm(tau=[10 * 24 * 3600.0, 1 * 24 * 3600.0], range=True, isotropic=False), "ouf"
+    return ctmm(tau=[10 * 24 * 3600.0], range=True, isotropic=False), "ou"
+
+
+def _fit_model(telem, params: AKDEParams):
+    model = str(params.model or "auto").lower()
+    if model == "ouf":
+        model0, model_name = _pick_model(params)
+        return ctmm_fit(telem, model0), model_name
+    if model == "auto":
+        guess = ctmm_guess(variogram(telem), ctmm(tau=[10 * 24 * 3600.0, 1 * 24 * 3600.0], range=True, isotropic=False))
+        fit = ctmm_select(telem, [guess], IC="AICc", MSPE="position", iterate=True, cores=int(params.cores))
+        return fit, str(getattr(fit, "model", "auto"))
+
+    candidates = [
+        ctmm(tau=[10 * 24 * 3600.0], range=True, isotropic=False),
+        ctmm(tau=[10 * 24 * 3600.0], range=True, isotropic=True),
+    ]
+    fitted = [ctmm_fit(telem, m) for m in candidates]
+    best = min(fitted, key=lambda m: float(m.params.get("AICc", np.inf)))
+    tau = best.params.get("tau", {})
+    selected = "ouf" if isinstance(tau, dict) and "velocity" in tau else "ou"
+    return best, selected
 
 
 def _column(df: pd.DataFrame, *names: str) -> str | None:
@@ -192,26 +145,6 @@ def _projected_crs(telem):
     raise ValueError("AKDE telemetry is missing projection metadata.")
 
 
-def _fit_model(telem, params: AKDEParams):
-    model = str(params.model or "auto").lower()
-    if model == "ouf":
-        model0 = ctmm(tau=[10 * 24 * 3600.0, 1 * 24 * 3600.0], range=True, isotropic=False)
-        return ctmm_fit(telem, model0), "ouf"
-    if model == "auto":
-        guess = ctmm_guess(variogram(telem), ctmm(tau=[10 * 24 * 3600.0, 1 * 24 * 3600.0], range=True, isotropic=False))
-        fit = ctmm_select(telem, [guess], IC="AICc", MSPE="position", iterate=True, cores=int(params.cores))
-        return fit, str(getattr(fit, "model", "auto"))
-    candidates = [
-        ctmm(tau=[10 * 24 * 3600.0], range=True, isotropic=False),
-        ctmm(tau=[10 * 24 * 3600.0], range=True, isotropic=True),
-    ]
-    fitted = [ctmm_fit(telem, m) for m in candidates]
-    best = min(fitted, key=lambda m: float(m.params.get("AICc", np.inf)))
-    tau = best.params.get("tau", {})
-    selected = "ouf" if isinstance(tau, dict) and "velocity" in tau else "ou"
-    return best, selected
-
-
 def _write_ud_raster(ud: dict, telem, out_path: str) -> None:
     gx = np.asarray(ud["r"]["x"], dtype=float)
     gy = np.asarray(ud["r"]["y"], dtype=float)
@@ -221,6 +154,7 @@ def _write_ud_raster(ud: dict, telem, out_path: str) -> None:
     if pdf.shape != (gx.size, gy.size):
         raise ValueError(f"AKDE PDF shape {pdf.shape} does not match grid {(gx.size, gy.size)}")
 
+    # ctmm_py stores arrays as [x, y]. GeoTIFF rows are north-to-south [y, x].
     x_min, x_max = _grid_edges(gx, dx)
     y_min, y_max = _grid_edges(gy, dy)
     src_raster = np.flipud(pdf.T).astype(np.float32)
@@ -228,7 +162,14 @@ def _write_ud_raster(ud: dict, telem, out_path: str) -> None:
     src_crs = _projected_crs(telem)
     dst_crs = CRS.from_epsg(4326)
     dst_transform, dst_width, dst_height = calculate_default_transform(
-        src_crs, dst_crs, src_raster.shape[1], src_raster.shape[0], x_min, y_min, x_max, y_max
+        src_crs,
+        dst_crs,
+        src_raster.shape[1],
+        src_raster.shape[0],
+        x_min,
+        y_min,
+        x_max,
+        y_max,
     )
     dst_raster = np.zeros((dst_height, dst_width), dtype=np.float32)
     reproject(
@@ -280,19 +221,24 @@ def _smooth_contour_from_cdf(cdf: np.ndarray, gx: np.ndarray, gy: np.ndarray, le
     finite = np.isfinite(z)
     if z.shape != (gx.size, gy.size) or not np.any(finite):
         return None
+
     zmin = float(np.nanmin(z[finite]))
     zmax = float(np.nanmax(z[finite]))
     level = float(level)
     if not (zmin < level < zmax):
         return None
 
+    # skimage uses array coordinates [row, col]. The AKDE grid is [x, y],
+    # so transpose to rows=y and cols=x before interpolating back to meters.
     z_yx = z.T
-    z_yx = np.where(np.isfinite(z_yx), z_yx, zmax)
+    fill = zmax
+    z_yx = np.where(np.isfinite(z_yx), z_yx, fill)
     contours = measure.find_contours(z_yx, level=level)
     polygons = []
     max_gap = 4.0 * max(abs(float(dx)), abs(float(dy)))
     x_index = np.arange(gx.size, dtype=float)
     y_index = np.arange(gy.size, dtype=float)
+
     for line in contours:
         if line.shape[0] < 4:
             continue
@@ -308,6 +254,7 @@ def _smooth_contour_from_cdf(cdf: np.ndarray, gx: np.ndarray, gy: np.ndarray, le
         poly = Polygon(coords).buffer(0)
         if not poly.is_empty and poly.area > 0:
             polygons.append(poly)
+
     if not polygons:
         return None
     return unary_union(polygons).buffer(0)
@@ -321,14 +268,17 @@ def _contour_from_ud(ud: dict, telem, level: float):
     dy = float(ud["dr"]["y"])
     if cdf.shape != (gx.size, gy.size):
         raise ValueError(f"AKDE CDF shape {cdf.shape} does not match grid {(gx.size, gy.size)}")
+
     mask_xy = np.isfinite(cdf) & (cdf <= float(level))
     if not np.any(mask_xy):
         return None
+
     geom_m = _smooth_contour_from_cdf(cdf, gx, gy, float(level), dx, dy)
     if geom_m is None:
         geom_m = _contour_from_mask(mask_xy, gx, gy, dx, dy)
     if geom_m is None:
         return None
+
     to_wgs = _projected_to_wgs_transform(telem)
     geom_ll = shp_transform(lambda x, y, z=None: to_wgs.transform(x, y), geom_m)
     if isinstance(geom_ll, (Polygon, MultiPolygon)) and not geom_ll.is_empty:
@@ -345,12 +295,24 @@ def _ci_ud_object(ud: dict) -> dict:
 
 
 def _area_ci_for_level(ud: dict, level: float) -> np.ndarray:
-    ci_m2 = CI_UD(_ci_ud_object(ud), level_UD=float(level), level=0.95)
+    ci_m2 = CI_UD(
+        _ci_ud_object(ud),
+        level_UD=float(level),
+        level=0.95,
+    )
     return np.asarray(ci_m2, dtype=float) / 1e6
 
 
 def _area_ci_contour_levels_for_level(ud: dict, level: float) -> np.ndarray:
-    return np.asarray(CI_UD(_ci_ud_object(ud), level_UD=float(level), level=0.95, P=True), dtype=float)
+    return np.asarray(
+        CI_UD(
+            _ci_ud_object(ud),
+            level_UD=float(level),
+            level=0.95,
+            P=True,
+        ),
+        dtype=float,
+    )
 
 
 def _write_variogram_plot(telem, model, model_name: str, out_path: str, params: AKDEParams) -> tuple[str | None, dict | None]:
@@ -371,6 +333,7 @@ def _write_variogram_plot(telem, model, model_name: str, out_path: str, params: 
     fig, axes = plt.subplots(2, 1, figsize=(8, 6), constrained_layout=True, height_ratios=[3.0, 1.0])
     axes[0].plot(lags_h, gamma_m2, color="#5b86c5", linewidth=1.8)
     axes[0].scatter(lags_h, gamma_m2, color="#d7e3ff", edgecolor="#5b86c5", linewidth=0.4, s=18, zorder=3)
+
     try:
         svf = svf_func(model)["svf"]
         curve_s = np.linspace(float(np.nanmin(lags_s)), float(np.nanmax(lags_s)), 240)
@@ -380,6 +343,7 @@ def _write_variogram_plot(telem, model, model_name: str, out_path: str, params: 
             axes[0].plot(curve_s[valid] / 3600.0, curve_gamma[valid], color="#1f2937", linewidth=1.5, label="Fitted CTMM")
     except Exception:
         pass
+
     axes[0].set_title(f"AKDE Variogram ({str(model_name).upper()})")
     axes[0].set_xlabel("Lag (hours)")
     axes[0].set_ylabel("Semivariance (m^2)")
@@ -388,10 +352,12 @@ def _write_variogram_plot(telem, model, model_name: str, out_path: str, params: 
     tau = model.params.get("tau", {}) if hasattr(model, "params") else {}
     if not isinstance(tau, dict):
         tau = {}
-    if tau.get("position"):
-        axes[0].axvline(float(tau["position"]) / 3600.0, color="#ff9f1c", linestyle="--", linewidth=1.4, label="tau_pos")
-    if tau.get("velocity"):
-        axes[0].axvline(float(tau["velocity"]) / 3600.0, color="#2a9d8f", linestyle=":", linewidth=1.5, label="tau_vel")
+    tau_pos_s = tau.get("position")
+    tau_vel_s = tau.get("velocity")
+    if tau_pos_s:
+        axes[0].axvline(float(tau_pos_s) / 3600.0, color="#ff9f1c", linestyle="--", linewidth=1.4, label="tau_pos")
+    if tau_vel_s:
+        axes[0].axvline(float(tau_vel_s) / 3600.0, color="#2a9d8f", linestyle=":", linewidth=1.5, label="tau_vel")
     handles, labels = axes[0].get_legend_handles_labels()
     if handles:
         axes[0].legend(loc="best")
@@ -405,9 +371,15 @@ def _write_variogram_plot(telem, model, model_name: str, out_path: str, params: 
         axes[1].grid(axis="y", alpha=0.2, linewidth=0.7)
     else:
         axes[1].axis("off")
+
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
-    return out_path, {"lags_s": lags_s.tolist(), "gamma_m2": gamma_m2.tolist(), "counts": counts.tolist() if counts.size else []}
+    variogram_meta = {
+        "lags_s": lags_s.tolist(),
+        "gamma_m2": gamma_m2.tolist(),
+        "counts": counts.tolist() if counts.size else [],
+    }
+    return out_path, variogram_meta
 
 
 def _model_meta(model, model_name: str, ud: dict) -> dict:
@@ -431,52 +403,18 @@ def _model_meta(model, model_name: str, ud: dict) -> dict:
     return meta
 
 
-def _json_safe(value):
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, (np.integer,)):
-        return int(value)
-    if isinstance(value, (np.floating,)):
-        return float(value)
-    if isinstance(value, (np.bool_,)):
-        return bool(value)
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
+def add_akdes(df: pd.DataFrame, percent_list, params: AKDEParams | None = None):
+    params = params or AKDEParams()
+    outputs_dir = storage.get_output_dir()
+    Path(outputs_dir).mkdir(parents=True, exist_ok=True)
 
-
-def _write_zip(output_dir: str) -> str:
-    archive_path = os.path.join(output_dir, "spatchat_results.zip")
-    if os.path.exists(archive_path):
-        os.remove(archive_path)
-    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk(output_dir):
-            dirs[:] = [d for d in dirs if d != "ctmm_py"]
-            for file in files:
-                if file.endswith(".zip"):
-                    continue
-                full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, output_dir)
-                zipf.write(full_path, arcname=rel_path)
-    return archive_path
-
-
-def main() -> None:
-    df = pd.read_csv(INPUT_CSV)
     if _column(df, "animal_id", "id") is None:
         df = df.copy()
         df["animal_id"] = "Animal_1"
 
     animal_col, ts_col, lon_col, lat_col = _normalise_input(df)
-    percents = sorted({int(p) for p in PERCENTS if 0 < int(p) <= 100})
+    percents = sorted({int(p) for p in percent_list if 0 < int(p) <= 100})
     if not percents:
-        print("No valid AKDE percentages requested.")
         return
 
     track_all = df[[animal_col, ts_col, lon_col, lat_col]].copy()
@@ -487,21 +425,20 @@ def main() -> None:
     track_all["latitude"] = pd.to_numeric(track_all["latitude"], errors="coerce")
     track_all = track_all.dropna().sort_values(["id", "timestamp"])
     track_all = track_all.drop_duplicates(subset=["id", "timestamp", "longitude", "latitude"], keep="first")
-    valid_ids = [animal for animal, group in track_all.groupby("id", sort=False) if len(group) >= int(PARAMS.min_points)]
+    valid_ids = [
+        animal
+        for animal, group in track_all.groupby("id", sort=False)
+        if len(group) >= int(params.min_points)
+    ]
     if not valid_ids:
-        raise ValueError("No animal has enough points for AKDE after cleaning.")
+        return
     track_all = track_all[track_all["id"].isin(valid_ids)].copy()
     telemetry_all = as_telemetry(track_all, id_col="id", time_col="timestamp", x_col="longitude", y_col="latitude")
 
-    rows = []
-    index = {"animals": {}}
-    features_all = []
-    to_delete_paths = set()
-    outdir_abs = os.path.abspath(OUTPUT_DIR)
-
     for animal, group in telemetry_all.data.groupby(telemetry_all.id_col, sort=False):
-        if len(group) < int(PARAMS.min_points):
+        if len(group) < int(params.min_points):
             continue
+
         telem = Telemetry(
             data=group.copy(),
             id_col=telemetry_all.id_col,
@@ -511,32 +448,44 @@ def main() -> None:
             crs=telemetry_all.crs,
             metadata=dict(telemetry_all.metadata),
         )
-        model, model_name = _fit_model(telem, PARAMS)
-        ud = ctmm_akde(telem, model, debias=bool(PARAMS.debias_area), res=max(2, int(round(float(PARAMS.grid_size) / 20.0))))
+        model, model_name = _fit_model(telem, params)
+        ud = ctmm_akde(
+            telem,
+            model,
+            debias=bool(params.debias_area),
+            res=max(2, int(round(float(params.grid_size) / 20.0))),
+        )
 
         safe = _safe_name(animal)
-        variogram_path = os.path.join(OUTPUT_DIR, f"akde_variogram_{safe}.png")
-        variogram_plot, variogram_meta = _write_variogram_plot(telem, model, model_name, variogram_path, PARAMS)
-        tif_path = os.path.join(OUTPUT_DIR, f"akde_{safe}.tif")
+        variogram_path = os.path.join(outputs_dir, f"akde_variogram_{safe}.png")
+        variogram_plot, variogram_meta = _write_variogram_plot(telem, model, model_name, variogram_path, params)
+        tif_path = os.path.join(outputs_dir, f"akde_{safe}.tif")
         _write_ud_raster(ud, telem, tif_path)
 
-        index["animals"].setdefault(str(animal), {})
+        storage.akde_results.setdefault(str(animal), {})
         meta = _model_meta(model, model_name, ud)
         if variogram_plot:
             meta["variogram_plot"] = variogram_plot
         if variogram_meta:
             meta["variogram"] = variogram_meta
-
         for percent in percents:
             level = float(percent) / 100.0
             contour = _contour_from_ud(ud, telem, level)
             ci = _area_ci_for_level(ud, level)
             ci_levels = _area_ci_contour_levels_for_level(ud, level)
+            ci_contours = {}
+            ci_contour_levels = {}
+            for label, idx in (("low", 0), ("high", 2)):
+                ci_level = float(ci_levels[idx]) if idx < ci_levels.size else float("nan")
+                if not np.isfinite(ci_level) or ci_level <= 0.0:
+                    continue
+                ci_level = min(max(ci_level, 0.0), 1.0)
+                ci_contour = _contour_from_ud(ud, telem, ci_level)
+                if ci_contour is not None:
+                    ci_contours[label] = ci_contour
+                    ci_contour_levels[label] = ci_level
             area_km2 = float(ci[1])
-            ci_low = float(ci[0])
-            ci_high = float(ci[2])
-
-            gj_path = os.path.join(OUTPUT_DIR, f"akde_{safe}_{percent}.geojson")
+            gj_path = os.path.join(outputs_dir, f"akde_{safe}_{percent}.geojson")
             if contour is not None:
                 feature = {
                     "type": "Feature",
@@ -544,8 +493,8 @@ def main() -> None:
                         "animal_id": str(animal),
                         "percent": int(percent),
                         "area_km2": area_km2,
-                        "area_ci95_low_km2": ci_low,
-                        "area_ci95_high_km2": ci_high,
+                        "area_ci95_low_km2": float(ci[0]),
+                        "area_ci95_high_km2": float(ci[2]),
                     },
                     "geometry": mapping(contour),
                 }
@@ -554,83 +503,50 @@ def main() -> None:
             else:
                 gj_path = None
 
-            ci_contours = []
-            for label, idx in (("low", 0), ("high", 2)):
-                ci_level = float(ci_levels[idx]) if idx < ci_levels.size else float("nan")
-                if not np.isfinite(ci_level) or ci_level <= 0.0:
-                    continue
-                ci_level = min(max(ci_level, 0.0), 1.0)
-                ci_contour = _contour_from_ud(ud, telem, ci_level)
-                if ci_contour is None:
-                    continue
-                ci_contours.append({
-                    "type": "Feature",
-                    "properties": {
-                        "animal_id": str(animal),
-                        "percent": int(percent),
-                        "contour_type": f"ci_{label}",
-                        "area_km2": float(ci[idx]),
-                        "area_ci95_low_km2": ci_low,
-                        "area_ci95_high_km2": ci_high,
-                        "contour_level": ci_level,
-                    },
-                    "geometry": mapping(ci_contour),
-                })
-
-            ci_gj_path = os.path.join(OUTPUT_DIR, f"akde_{safe}_{percent}_ci.geojson")
+            ci_gj_path = os.path.join(outputs_dir, f"akde_{safe}_{percent}_ci.geojson")
             if ci_contours:
+                ci_features = []
+                for label, geom in ci_contours.items():
+                    idx = 0 if label == "low" else 2
+                    ci_features.append(
+                        {
+                            "type": "Feature",
+                            "properties": {
+                                "animal_id": str(animal),
+                                "percent": int(percent),
+                                "contour_type": f"ci_{label}",
+                                "area_km2": float(ci[idx]),
+                                "area_ci95_low_km2": float(ci[0]),
+                                "area_ci95_high_km2": float(ci[2]),
+                                "contour_level": float(ci_contour_levels[label]),
+                            },
+                            "geometry": mapping(geom),
+                        }
+                    )
                 with open(ci_gj_path, "w", encoding="utf-8") as f:
-                    json.dump({"type": "FeatureCollection", "features": ci_contours}, f)
+                    json.dump({"type": "FeatureCollection", "features": ci_features}, f)
             else:
                 ci_gj_path = None
 
-            rows.append((str(animal), f"AKDE-{int(percent)}", area_km2, ci_low, ci_high))
-            index["animals"][str(animal)][str(percent)] = {
+            storage.akde_results[str(animal)][int(percent)] = {
+                "contour": contour,
+                "ci_contours": ci_contours,
+                "ci_contour_levels": ci_contour_levels,
+                "area": area_km2,
                 "area_km2": area_km2,
-                "area_ci95_km2": [ci_low, ci_high],
+                "area_ci95_km2": [float(ci[0]), float(ci[2])],
+                "ci_low_km2": float(ci[0]),
+                "ci_high_km2": float(ci[2]),
+                "dof_area": meta["dof_area"],
+                "dof_h": meta["dof_h"],
+                "model": model_name,
                 "geotiff": tif_path,
                 "geojson": gj_path,
                 "ci_geojson": ci_gj_path,
-                "meta": _json_safe(meta),
+                "raster_path": tif_path,
+                "geojson_path": gj_path,
+                "meta": dict(meta),
             }
 
-            if gj_path and os.path.exists(gj_path):
-                with open(gj_path, "r", encoding="utf-8") as f:
-                    feat = json.load(f)
-                features_all.append(feat)
-                gj_abs = os.path.abspath(gj_path)
-                if gj_abs.startswith(outdir_abs + os.sep):
-                    to_delete_paths.add(gj_abs)
-            if ci_gj_path and os.path.exists(ci_gj_path):
-                with open(ci_gj_path, "r", encoding="utf-8") as f:
-                    ci_gj = json.load(f)
-                features_all.extend(ci_gj.get("features", []) or [])
-                ci_gj_abs = os.path.abspath(ci_gj_path)
-                if ci_gj_abs.startswith(outdir_abs + os.sep):
-                    to_delete_paths.add(ci_gj_abs)
 
-    if rows:
-        areas = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2", "ci_low_km2", "ci_high_km2"])
-        areas.sort_values(["animal_id", "type"], inplace=True)
-        areas.to_csv(os.path.join(OUTPUT_DIR, "home_range_areas.csv"), index=False)
-
-    if any(index["animals"].values()):
-        with open(os.path.join(OUTPUT_DIR, "akde_index.json"), "w", encoding="utf-8") as f:
-            json.dump(index, f, indent=2)
-
-    if features_all:
-        with open(os.path.join(OUTPUT_DIR, "akdes_all.geojson"), "w", encoding="utf-8") as f:
-            json.dump({"type": "FeatureCollection", "features": features_all}, f)
-        for path in sorted(to_delete_paths):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
-    archive_path = _write_zip(OUTPUT_DIR)
-    print(f"AKDE outputs written to: {OUTPUT_DIR}")
-    print(f"Zip archive: {archive_path}")
-
-
-if __name__ == "__main__":
-    main()
+__all__ = ["AKDEParams", "add_akdes"]

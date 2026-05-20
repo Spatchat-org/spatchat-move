@@ -18,6 +18,9 @@ import gradio as gr
 import pandas as pd
 from gradio.context import LocalContext
 import numpy as np
+import matplotlib
+
+matplotlib.use("Agg", force=True)
 
 # ---- Local modules ----
 from storage import (
@@ -49,10 +52,10 @@ from schema_detect import (
 )
 from dataset_context import build_dataset_context
 
-from estimators.locoh import compute_locoh, LoCoHParams
-from estimators.dbbmm import compute_dbbmm, DBBMMParams
-from estimators.kde import add_kdes, KDEParams
-from estimators.akde import add_akdes, AKDEParams
+from methods.locoh import compute_locoh, LoCoHParams
+from methods.dbbmm import compute_dbbmm, DBBMMParams
+from methods.kde import add_kdes, KDEParams
+from methods.akde import add_akdes, AKDEParams
 from movement_analysis import (
     run_autocorrelation_analysis,
     run_displacement_analysis,
@@ -199,6 +202,30 @@ def _write_repro_scripts(output_dir: str) -> list[str]:
         shutil.copyfile(os.path.join(REPRO_TEMPLATE_DIR, "README.txt"), target)
         paths.append(target)
 
+    def copy_ctmm_py_runtime() -> list[str]:
+        src_root = os.path.join(os.path.dirname(__file__), "methods", "ctmm_py")
+        dst_root = os.path.join(script_dir, "ctmm_py")
+        if not os.path.exists(src_root):
+            return []
+        if os.path.exists(dst_root):
+            shutil.rmtree(dst_root)
+        copied = []
+        skip_dirs = {"__pycache__"}
+        skip_files: set[str] = set()
+        for root, dirs, files in os.walk(src_root):
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            rel_dir = os.path.relpath(root, src_root)
+            target_dir = dst_root if rel_dir == "." else os.path.join(dst_root, rel_dir)
+            os.makedirs(target_dir, exist_ok=True)
+            for file in files:
+                if not file.endswith(".py") or file.endswith(".pyc") or file in skip_files:
+                    continue
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, file)
+                shutil.copyfile(src, dst)
+                copied.append(dst)
+        return copied
+
     template_map = {
         "mcp": ("mcp_reproduce.txt", bool(manifest.get("mcp", {}).get("percents"))),
         "kde": ("kde_reproduce.txt", bool(manifest.get("kde", {}).get("percents"))),
@@ -220,6 +247,8 @@ def _write_repro_scripts(output_dir: str) -> list[str]:
         dst = os.path.join(script_dir, filename)
         shutil.copyfile(src, dst)
         paths.append(dst)
+        if filename == "akde_reproduce.txt":
+            paths.extend(copy_ctmm_py_runtime())
     if any(manifest.get("movement", {}).get(key) for key in ("displacement", "step_lengths", "turning_angles", "autocorrelation", "hmm")):
         helper_src = os.path.join(REPRO_TEMPLATE_DIR, "movement_common.py.txt")
         if os.path.exists(helper_src):
@@ -420,6 +449,25 @@ def _get_ready_dataframe(session_id: str | None) -> tuple[str, pd.DataFrame | No
         _restore_session_dataframe(sid)
         df = get_cached_df()
     return sid, df
+
+
+_DEFAULT_ANIMAL_ID = "Animal_1"
+
+
+def _ensure_default_animal_id(df: pd.DataFrame | None) -> tuple[pd.DataFrame | None, bool]:
+    if df is None:
+        return None, False
+    out = df.copy()
+    assumed = ID_COL not in out.columns
+    if assumed:
+        out[ID_COL] = _DEFAULT_ANIMAL_ID
+        return out, True
+
+    values = out[ID_COL].astype("string").str.strip()
+    missing = values.isna() | values.eq("") | values.str.lower().isin({"nan", "none", "null", "na"})
+    assumed = bool(missing.all())
+    out[ID_COL] = values.where(~missing, _DEFAULT_ANIMAL_ID).astype(str)
+    return out, assumed
 
 # --- permissive level parser (allows 100) -----------------------------------
 def _parse_levels_allow_100(text: str) -> list[int]:
@@ -1022,6 +1070,7 @@ def handle_upload_initial(file, session_id):
         src_ts = detect_timestamp_column(df0)
 
         df1, _ = detect_and_standardize(df0)
+        df1, single_id_assumed = _ensure_default_animal_id(df1)
         set_cached_df(df1)
         _remember_dataset_session(session_id)
         _persist_session_dataframe(session_id, df1)
@@ -1029,11 +1078,11 @@ def handle_upload_initial(file, session_id):
 
         id_found = (ID_COL in df1.columns)
         ts_found = (TS_COL in df1.columns)
-        id_note = f"• **ID column**: `{src_id}`" if src_id else "• **ID column**: `not detected`"
+        id_note = f"• **ID column**: `{src_id}`" if src_id else f"• **ID column**: `not detected`; using `{_DEFAULT_ANIMAL_ID}` for all rows"
         ts_note = f"• **Timestamp column**: `{src_ts}`" if src_ts else "• **Timestamp column**: `not detected`"
 
         tips = []
-        if not id_found:
+        if not id_found and not single_id_assumed:
             tips.append("If your data has one, say: **“ID column is <your_col>”** or **“no id”**.")
         if not ts_found:
             tips.append("If your data has one, say: **“Timestamp column is <your_col>”** or **“no timestamp”**.")
@@ -1067,6 +1116,7 @@ def handle_upload_initial(file, session_id):
         src_ts = detect_timestamp_column(df0)
 
         df1, _ = detect_and_standardize(df0)
+        df1, single_id_assumed = _ensure_default_animal_id(df1)
         set_cached_df(df1)
         _remember_dataset_session(session_id)
         _persist_session_dataframe(session_id, df1)
@@ -1074,11 +1124,11 @@ def handle_upload_initial(file, session_id):
 
         id_found = (ID_COL in df1.columns)
         ts_found = (TS_COL in df1.columns)
-        id_note = f"• **ID column**: `{src_id}`" if src_id else "• **ID column**: `not detected`"
+        id_note = f"• **ID column**: `{src_id}`" if src_id else f"• **ID column**: `not detected`; using `{_DEFAULT_ANIMAL_ID}` for all rows"
         ts_note = f"• **Timestamp column**: `{src_ts}`" if src_ts else "• **Timestamp column**: `not detected`"
 
         tips = []
-        if not id_found:
+        if not id_found and not single_id_assumed:
             tips.append("If your data has one, say: **“ID column is <your_col>”** or **“no id”**.")
         if not ts_found:
             tips.append("If your data has one, say: **“Timestamp column is <your_col>”** or **“no timestamp”**.")
@@ -1154,6 +1204,7 @@ def handle_upload_confirm(x_col, y_col, crs_text, session_id):
             return f"<p>Failed to convert coordinates: {e}</p>"
 
     df, _ = detect_and_standardize(df)
+    df, _ = _ensure_default_animal_id(df)
     set_cached_df(df)
     _remember_dataset_session(session_id)
     _persist_session_dataframe(session_id, df)
@@ -1323,7 +1374,10 @@ def handle_chat(chat_history, user_message, session_id, figure_state):
             return
 
         df2, msg = try_apply_user_mapping(df, cmd)
+        df2, _ = _ensure_default_animal_id(df2)
         set_cached_df(df2)
+        _remember_dataset_session(session_id)
+        _persist_session_dataframe(session_id, df2)
 
         pending["need_id"] = (ID_COL not in df2.columns)
         pending["need_ts"] = (TS_COL not in df2.columns)
@@ -1498,6 +1552,7 @@ def handle_chat(chat_history, user_message, session_id, figure_state):
                 use_effective_n=True,
                 estimate_velocity_tau=True,
                 smooth=True,
+                cores=_get_int(["cores", "core"], 0),
             )
 
     if has_locoh:
@@ -1594,6 +1649,10 @@ def handle_chat(chat_history, user_message, session_id, figure_state):
         yield chat_history, gr.skip(), gr.update(visible=False), _status_clear_update(), gr.update(value=_render_figure_viewer(figure_state)), figure_state
         return
 
+    df, single_id_assumed_for_analysis = _ensure_default_animal_id(df)
+    set_cached_df(df)
+    _persist_session_dataframe(session_id, df)
+
     timestamp_required = _requested_timestamp_dependent_analyses(akde_list, dbbmm_list, movement_requests)
     has_timestamp = "timestamp" in df.columns and pd.to_datetime(df["timestamp"], errors="coerce", utc=True).notna().any()
     if timestamp_required and not has_timestamp:
@@ -1610,6 +1669,8 @@ def handle_chat(chat_history, user_message, session_id, figure_state):
 
     def _run_requested_analyses():
         df_local = get_cached_df()
+        df_local, _ = _ensure_default_animal_id(df_local)
+        set_cached_df(df_local)
         results_exist = False
         local_warned_about_kde_100 = warned_about_kde_100
 
@@ -1626,7 +1687,7 @@ def handle_chat(chat_history, user_message, session_id, figure_state):
         movement_msgs = []
 
         if mcp_list:
-            from estimators.mcp import add_mcps
+            from methods.mcp import add_mcps
 
             add_mcps(df_local, mcp_list)
             requested_percents.update(mcp_list)
@@ -1712,6 +1773,8 @@ def handle_chat(chat_history, user_message, session_id, figure_state):
         )
 
         msgs = []
+        if single_id_assumed_for_analysis:
+            msgs.append(f"No animal ID column was detected, so all rows were treated as `{_DEFAULT_ANIMAL_ID}`.")
         if requested_percents:
             msgs.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(requested_percents))}%) calculated.")
         if requested_kde_percents:
