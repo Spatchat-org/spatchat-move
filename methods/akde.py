@@ -47,6 +47,7 @@ class AKDEParams:
     smooth: bool = True
     debias_area: bool = True
     debias_strength: float = 0.22
+    cores: int = 0
 
 
 def _safe_name(value) -> str:
@@ -68,7 +69,7 @@ def _fit_model(telem, params: AKDEParams):
         return ctmm_fit(telem, model0), model_name
     if model == "auto":
         guess = ctmm_guess(variogram(telem), ctmm(tau=[10 * 24 * 3600.0, 1 * 24 * 3600.0], range=True, isotropic=False))
-        fit = ctmm_select(telem, [guess], IC="AICc", MSPE="position", iterate=True)
+        fit = ctmm_select(telem, [guess], IC="AICc", MSPE="position", iterate=True, cores=int(params.cores))
         return fit, str(getattr(fit, "model", "auto"))
 
     candidates = [
