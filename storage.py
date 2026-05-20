@@ -348,11 +348,18 @@ def _write_akde_assets(rows_accum: list[tuple], outdir: str):
         for percent, v in percents.items():
             any_akde = True
             area = float(v.get("area", 0.0))
-            rows_accum.append((animal, f"AKDE-{percent}", area))
+            ci95 = v.get("area_ci95_km2")
+            ci_low = ci_high = None
+            if isinstance(ci95, (list, tuple)) and len(ci95) == 2:
+                ci_low = float(ci95[0])
+                ci_high = float(ci95[1])
+            rows_accum.append((animal, f"AKDE-{percent}", area, ci_low, ci_high))
             index["animals"][animal][str(percent)] = {
                 "area_km2": area,
+                "area_ci95_km2": ci95,
                 "geotiff": v.get("geotiff"),
                 "geojson": v.get("geojson"),
+                "ci_geojson": v.get("ci_geojson"),
                 "meta": v.get("meta"),
             }
 
@@ -389,6 +396,55 @@ def _write_akde_assets(rows_accum: list[tuple], outdir: str):
                 props["animal_id"] = str(animal)
                 props["percent"] = int(percent)
                 props["area_km2"] = area
+                if isinstance(ci95, (list, tuple)) and len(ci95) == 2:
+                    props["area_ci95_low_km2"] = float(ci95[0])
+                    props["area_ci95_high_km2"] = float(ci95[1])
+                features_all.append(feat)
+
+            ci_feat_list = []
+            ci_gj_path = v.get("ci_geojson")
+            if ci_gj_path and os.path.exists(ci_gj_path):
+                try:
+                    with open(ci_gj_path, "r", encoding="utf-8") as f:
+                        ci_gj = json.load(f)
+                    if isinstance(ci_gj, dict) and ci_gj.get("type") == "FeatureCollection":
+                        ci_feat_list = ci_gj.get("features", []) or []
+                    elif isinstance(ci_gj, dict) and ci_gj.get("type") == "Feature":
+                        ci_feat_list = [ci_gj]
+                    ci_gj_abs = os.path.abspath(ci_gj_path)
+                    if ci_gj_abs.startswith(outdir_abs + os.sep):
+                        to_delete_paths.add(ci_gj_abs)
+                except Exception:
+                    ci_feat_list = []
+
+            if not ci_feat_list:
+                ci_contours = v.get("ci_contours") or {}
+                for label, geom in ci_contours.items():
+                    try:
+                        ci_feat_list.append({
+                            "type": "Feature",
+                            "properties": {"contour_type": f"ci_{label}"},
+                            "geometry": mapping(geom),
+                        })
+                    except Exception:
+                        continue
+
+            for feat in ci_feat_list:
+                if not isinstance(feat, dict):
+                    continue
+                props = feat.setdefault("properties", {})
+                props["animal_id"] = str(animal)
+                props["percent"] = int(percent)
+                contour_type = str(props.get("contour_type", ""))
+                if contour_type == "ci_low" and ci_low is not None:
+                    props["area_km2"] = ci_low
+                elif contour_type == "ci_high" and ci_high is not None:
+                    props["area_km2"] = ci_high
+                elif "area_km2" not in props:
+                    props["area_km2"] = area
+                if isinstance(ci95, (list, tuple)) and len(ci95) == 2:
+                    props["area_ci95_low_km2"] = float(ci95[0])
+                    props["area_ci95_high_km2"] = float(ci95[1])
                 features_all.append(feat)
 
     if any_akde:
@@ -499,7 +555,28 @@ def save_all_mcps_zip():
     _write_dbbmm_assets(rows, outdir)
 
     if rows:
-        df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
+        normalized_rows = []
+        for row in rows:
+            if isinstance(row, dict):
+                normalized_rows.append({
+                    "animal_id": row.get("animal_id"),
+                    "type": row.get("type"),
+                    "area_km2": row.get("area_km2"),
+                    "ci_low_km2": row.get("ci_low_km2"),
+                    "ci_high_km2": row.get("ci_high_km2"),
+                })
+                continue
+            animal_id, method_type, area_km2 = row[:3]
+            ci_low_km2 = row[3] if len(row) > 3 else None
+            ci_high_km2 = row[4] if len(row) > 4 else None
+            normalized_rows.append({
+                "animal_id": animal_id,
+                "type": method_type,
+                "area_km2": area_km2,
+                "ci_low_km2": ci_low_km2,
+                "ci_high_km2": ci_high_km2,
+            })
+        df = pd.DataFrame(normalized_rows, columns=["animal_id", "type", "area_km2", "ci_low_km2", "ci_high_km2"])
         df.sort_values(["animal_id", "type"], inplace=True)
         df.to_csv(os.path.join(outdir, "home_range_areas.csv"), index=False)
 

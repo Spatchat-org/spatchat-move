@@ -16,7 +16,8 @@ Current state:
 - mcp_reproduce.txt is standalone and does not depend on this repository's Python modules.
 - kde_reproduce.txt is standalone and reproduces the KDE raster/contour export files.
 - locoh_reproduce.txt is standalone and reproduces the LoCoH JSON/GeoJSON export files.
-- akde_reproduce.txt is standalone and reproduces the AKDE raster/contour/variogram export files.
+- akde_reproduce.txt is standalone when exported with its readable sibling ctmm_py
+  runtime folder, and reproduces the AKDE raster/contour/CI/variogram export files.
 - dbbmm_reproduce.txt is standalone and reproduces the dBBMM raster/isopleth export files.
 - displacement_reproduce.txt, step_lengths_reproduce.txt, turning_angles_reproduce.txt,
   autocorrelation_reproduce.txt, and hmm_reproduce.txt are also available and use the

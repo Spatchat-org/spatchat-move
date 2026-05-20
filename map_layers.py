@@ -11,6 +11,41 @@ from pyproj import Transformer
 from branca.element import MacroElement, Template
 
 
+def _add_polygon_geom(
+    layer,
+    geom,
+    *,
+    color,
+    popup,
+    fill=True,
+    fill_opacity=0.2,
+    weight=2,
+    opacity=1.0,
+    dash_array=None,
+):
+    def add_one(poly):
+        if poly.is_empty:
+            return
+        kwargs = {
+            "locations": [(lat, lon) for lon, lat in poly.exterior.coords],
+            "color": color,
+            "fill": fill,
+            "fill_opacity": fill_opacity,
+            "weight": weight,
+            "opacity": opacity,
+            "popup": popup,
+        }
+        if dash_array:
+            kwargs["dash_array"] = dash_array
+        layer.add_child(folium.Polygon(**kwargs))
+
+    if isinstance(geom, MultiPolygon):
+        for poly in geom.geoms:
+            add_one(poly)
+    elif isinstance(geom, Polygon):
+        add_one(geom)
+
+
 def _base_map(center_lat, center_lon, control_scale=True, zoom=9):
     m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom, control_scale=control_scale)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -203,17 +238,20 @@ def make_kde_layers(kde_results, requested_kde_percents, animal_ids, color_map):
             raster_layer = folium.FeatureGroup(name=f"{animal} KDE Raster", show=True)
             with rasterio.open(v["geotiff"]) as src:
                 arr = np.nan_to_num(src.read(1), nan=0.0)
-                a, b = float(arr.min()), float(arr.max())
-                arr_norm = (arr - a) / (b - a) if b > a else np.zeros_like(arr, dtype=np.float32)
+                valid = np.isfinite(arr) & (arr > 0)
+                b = float(arr[valid].max()) if np.any(valid) else 0.0
+                arr_norm = (arr / b) if b > 0 else np.zeros_like(arr, dtype=np.float32)
+                arr_norm = np.clip(arr_norm, 0.0, 1.0)
                 cmap = plt.get_cmap('plasma')
                 rgba = (cmap(arr_norm) * 255).astype(np.uint8)
                 bounds = src.bounds
-                img = np.dstack([rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], (rgba[:, :, 3] * 0.7).astype(np.uint8)])
+                alpha = np.where(valid, np.power(arr_norm, 0.35) * 190.0, 0.0).astype(np.uint8)
+                img = np.dstack([rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], alpha])
                 raster_layer.add_child(
                     folium.raster_layers.ImageOverlay(
                         image=img,
                         bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-                        opacity=0.7,
+                        opacity=1.0,
                         interactive=False
                     )
                 )
@@ -261,20 +299,23 @@ def make_akde_layers(akde_results, requested_akde_percents, animal_ids, color_ma
                 raster_layer = folium.FeatureGroup(name=f"{animal} AKDE Raster", show=True)
                 with rasterio.open(tif_path) as src:
                     arr = np.nan_to_num(src.read(1), nan=0.0)
-                    a, b = float(arr.min()), float(arr.max())
-                    arr_norm = (arr - a) / (b - a) if b > a else np.zeros_like(arr, dtype=np.float32)
+                    valid = np.isfinite(arr) & (arr > 0)
+                    b = float(arr[valid].max()) if np.any(valid) else 0.0
+                    arr_norm = (arr / b) if b > 0 else np.zeros_like(arr, dtype=np.float32)
+                    arr_norm = np.clip(arr_norm, 0.0, 1.0)
                     cmap = plt.get_cmap("plasma")
                     rgba = (cmap(arr_norm) * 255).astype(np.uint8)
                     bounds = src.bounds
+                    alpha = np.where(valid, np.power(arr_norm, 0.35) * 190.0, 0.0).astype(np.uint8)
                     img = np.dstack([
                         rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2],
-                        (rgba[:, :, 3] * 0.7).astype(np.uint8)
+                        alpha
                     ])
                     raster_layer.add_child(
                         folium.raster_layers.ImageOverlay(
                             image=img,
                             bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-                            opacity=0.7,
+                            opacity=1.0,
                             interactive=False
                         )
                     )
@@ -284,29 +325,49 @@ def make_akde_layers(akde_results, requested_akde_percents, animal_ids, color_ma
             v = akde_results[animal][percent]
             contour_layer = folium.FeatureGroup(name=f"{animal} AKDE {percent}% Contour", show=True)
             contour = v.get("contour")
+            area = float(v.get("area", 0.0))
+            ci = v.get("area_ci95_km2")
+            if isinstance(ci, (list, tuple)) and len(ci) == 2:
+                popup = f"{animal} AKDE {percent}% Contour<br>Area: {area:.2f} km²<br>95% CI: [{float(ci[0]):.2f}, {float(ci[1]):.2f}] km²"
+            else:
+                popup = f"{animal} AKDE {percent}% Contour<br>Area: {area:.2f} km²"
             if contour:
-                if isinstance(contour, MultiPolygon):
-                    for poly in contour.geoms:
-                        contour_layer.add_child(
-                            folium.Polygon(
-                                locations=[(lat, lon) for lon, lat in poly.exterior.coords],
-                                color=color_map[animal],
-                                fill=True,
-                                fill_opacity=0.2,
-                                popup=f"{animal} AKDE {percent}% Contour"
-                            )
-                        )
-                elif isinstance(contour, Polygon):
-                    contour_layer.add_child(
-                        folium.Polygon(
-                            locations=[(lat, lon) for lon, lat in contour.exterior.coords],
-                            color=color_map[animal],
-                            fill=True,
-                            fill_opacity=0.2,
-                            popup=f"{animal} AKDE {percent}% Contour"
-                        )
-                    )
+                _add_polygon_geom(
+                    contour_layer,
+                    contour,
+                    color=color_map[animal],
+                    fill=True,
+                    fill_opacity=0.2,
+                    popup=popup,
+                )
             layers.append(contour_layer)
+
+            ci_contours = v.get("ci_contours") or {}
+            if ci_contours:
+                ci_layer = folium.FeatureGroup(name=f"{animal} AKDE {percent}% 95% CI Contours", show=True)
+                ci_values = {
+                    "low": v.get("ci_low_km2"),
+                    "high": v.get("ci_high_km2"),
+                }
+                for label, ci_contour in ci_contours.items():
+                    ci_area = ci_values.get(label)
+                    area_text = f"{float(ci_area):.2f} km^2" if ci_area is not None else "not available"
+                    ci_popup = (
+                        f"{animal} AKDE {percent}% 95% CI {label} contour"
+                        f"<br>Area: {area_text}"
+                    )
+                    _add_polygon_geom(
+                        ci_layer,
+                        ci_contour,
+                        color=color_map[animal],
+                        fill=False,
+                        fill_opacity=0.0,
+                        weight=2 if label == "low" else 3,
+                        opacity=0.9 if label == "low" else 0.75,
+                        dash_array="5,5" if label == "low" else "10,6",
+                        popup=ci_popup,
+                    )
+                layers.append(ci_layer)
     return layers
 
 
