@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any
 
 import numpy as np
@@ -907,8 +909,11 @@ def _innovations_ouf_scalar(x: np.ndarray, t: np.ndarray, tau: list[float], erro
     cov11 = omega2
     err = np.empty(n, dtype=float)
     var = np.empty(n, dtype=float)
+    tiny = np.finfo(float).tiny
     for i in range(n):
-        qi = max(float(cov00 + errv[i]), np.finfo(float).tiny)
+        qi = float(cov00 + errv[i])
+        if qi < tiny:
+            qi = tiny
         ei = float(x[i] - state0)
         gain0 = cov00 / qi
         gain1 = cov01 / qi
@@ -2929,15 +2934,55 @@ def _ctmm_sort_key(model: CTMMModel, IC: str, MSPE: str | None = "position") -> 
     return ic, np.inf
 
 
+def _fit_select_candidate(payload):
+    idx, telem, cand, ic_upper = payload
+    try:
+        fit = ctmm_fit(telem, cand)
+        if ic_upper in {"LOOCV", "HSCV"}:
+            try:
+                from .cv import HSCV, LOOCV
+
+                fit.params[ic_upper] = float(LOOCV(telem, fit) if ic_upper == "LOOCV" else HSCV(telem, fit))
+            except Exception:
+                fit.params[ic_upper] = float("inf")
+        fit.params["_select_candidate"] = {
+            "model": fit.model,
+            "isotropic": bool(fit.params.get("isotropic", False)),
+            "circle": float(fit.params.get("circle", 0.0) or 0.0),
+            "error": bool(fit.params.get("error", False)),
+            "AIC": float(fit.params.get("AIC", np.inf)),
+            "AICc": float(fit.params.get("AICc", np.inf)),
+            "BIC": float(fit.params.get("BIC", np.inf)),
+            "LOOCV": float(fit.params.get("LOOCV", np.inf)),
+            "HSCV": float(fit.params.get("HSCV", np.inf)),
+        }
+        return idx, fit, None
+    except Exception as exc:
+        return idx, None, {"model": cand.model, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _auto_select_cores(cores: int, n_candidates: int) -> int:
+    if n_candidates <= 1:
+        return 1
+    if cores <= 0:
+        # Windows process pools require the launched app module to be safely
+        # importable under spawn. Keep auto mode sequential there; Linux/HF can
+        # use forked workers without changing model-selection logic.
+        if os.name == "nt":
+            return 1
+        cores = min(4, os.cpu_count() or 1)
+    return max(1, min(int(cores), int(n_candidates)))
+
+
 def ctmm_select(telem: Telemetry, models: list[CTMMModel], **kwargs):
     IC = str(kwargs.pop("IC", "AICc"))
     MSPE = kwargs.pop("MSPE", "position")
     level = float(kwargs.pop("level", 1.0))
     verbose = bool(kwargs.pop("verbose", False))
     trace = bool(kwargs.pop("trace", False))
-    cores = int(kwargs.pop("cores", 1))
+    cores = int(kwargs.pop("cores", 0))
     iterate = bool(kwargs.pop("iterate", True))
-    del level, trace, cores, kwargs
+    del level, trace, kwargs
     if isinstance(models, CTMMModel):
         models = [models]
     if not models:
@@ -2945,32 +2990,34 @@ def ctmm_select(telem: Telemetry, models: list[CTMMModel], **kwargs):
     ic_upper = str(IC).upper()
     include_range_free = ic_upper in {"LOOCV", "HSCV", "NA", "NAN", "NONE"}
     candidates = _ctmm_select_candidates(telem, models, include_range_free=include_range_free) if iterate else list(models)
+    cores_use = _auto_select_cores(int(cores), len(candidates))
     fitted: list[CTMMModel] = []
     errors: list[dict[str, str]] = []
-    for cand in candidates:
+    payloads = [(idx, telem, cand, ic_upper) for idx, cand in enumerate(candidates)]
+    results = []
+    if cores_use > 1:
+        old_skip_launch = os.environ.get("SPATCHAT_SKIP_LAUNCH")
+        os.environ["SPATCHAT_SKIP_LAUNCH"] = "1"
         try:
-            fit = ctmm_fit(telem, cand)
-            if ic_upper in {"LOOCV", "HSCV"}:
-                try:
-                    from .cv import HSCV, LOOCV
-
-                    fit.params[ic_upper] = float(LOOCV(telem, fit) if ic_upper == "LOOCV" else HSCV(telem, fit))
-                except Exception:
-                    fit.params[ic_upper] = float("inf")
-            fit.params["_select_candidate"] = {
-                "model": fit.model,
-                "isotropic": bool(fit.params.get("isotropic", False)),
-                "circle": float(fit.params.get("circle", 0.0) or 0.0),
-                "error": bool(fit.params.get("error", False)),
-                "AIC": float(fit.params.get("AIC", np.inf)),
-                "AICc": float(fit.params.get("AICc", np.inf)),
-                "BIC": float(fit.params.get("BIC", np.inf)),
-                "LOOCV": float(fit.params.get("LOOCV", np.inf)),
-                "HSCV": float(fit.params.get("HSCV", np.inf)),
-            }
-            fitted.append(fit)
+            with ProcessPoolExecutor(max_workers=cores_use) as executor:
+                futures = [executor.submit(_fit_select_candidate, payload) for payload in payloads]
+                for future in as_completed(futures):
+                    results.append(future.result())
         except Exception as exc:
-            errors.append({"model": cand.model, "error": f"{type(exc).__name__}: {exc}"})
+            errors.append({"model": "parallel", "error": f"{type(exc).__name__}: {exc}; falling back to sequential selection"})
+            results = [_fit_select_candidate(payload) for payload in payloads]
+        finally:
+            if old_skip_launch is None:
+                os.environ.pop("SPATCHAT_SKIP_LAUNCH", None)
+            else:
+                os.environ["SPATCHAT_SKIP_LAUNCH"] = old_skip_launch
+    else:
+        results = [_fit_select_candidate(payload) for payload in payloads]
+    for _, fit, err in sorted(results, key=lambda item: item[0]):
+        if fit is not None:
+            fitted.append(fit)
+        elif err is not None:
+            errors.append(err)
     if not fitted:
         if errors:
             raise RuntimeError(f"ctmm.select could not fit any candidate: {errors[0]['error']}")
