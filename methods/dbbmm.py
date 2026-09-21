@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Sequence
 
 import math
 import os
@@ -15,6 +15,8 @@ from affine import Affine
 
 import rasterio
 from rasterio.features import shapes as rio_shapes
+
+from scipy.optimize import minimize_scalar
 
 from shapely.geometry import (
     shape as shp_shape,
@@ -31,19 +33,59 @@ from shapely.ops import (
 from pyproj import CRS, Transformer
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Parameters
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 @dataclass
 class DBBMMParams:
-    location_error_m: float = 30.0
+    """
+    Parameters modeled after move::brownian.bridge.dyn().
+
+    location_error_m
+        Location error in projected map units (meters). May be a scalar
+        or a sequence with one value per location.
+
+    window_size
+        Sliding window size used to estimate dynamic Brownian motion
+        variance. Must be odd.
+
+    margin
+        Margin used within the sliding variance window. Must be odd.
+
+    raster_resolution_m
+        Raster cell size in meters.
+
+    ext
+        Proportional extension of the track bounding box, matching the
+        semantics of move::brownian.bridge.dyn(ext=...).
+
+        ext=0.3 expands each side by 30% of the original range.
+
+    time_step_min
+        Integration time step in minutes. If None, use the move default:
+        shortest positive time lag / 15.
+
+    isopleths
+        Requested utilization-distribution contours.
+    """
+
+    location_error_m: float | Sequence[float] = 30.0
     window_size: int = 31
     margin: int = 11
     raster_resolution_m: float = 50.0
-    buffer_m: float = 1000.0
-    n_substeps: int = 40
+    ext: float = 0.3
+    time_step_min: Optional[float] = None
     isopleths: Tuple[int, ...] = (50, 95)
+
+    # -------------------------------------------------------------------------
+    # Deprecated compatibility arguments.
+    #
+    # Older Spatchat app.py versions may still pass these. They are deliberately
+    # ignored because they do not correspond to move::brownian.bridge.dyn().
+    # -------------------------------------------------------------------------
+    buffer_m: Optional[float] = None
+    n_substeps: Optional[int] = None
 
 
 @dataclass
@@ -52,61 +94,1422 @@ class DBBMMResult:
     isopleths: List[Dict]
 
 
-# -----------------------------------------------------------------------------
-# Projection helper
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Projection
+# =============================================================================
 
 def _local_utm_crs(longitudes, latitudes):
     """
-    Select a local WGS84 UTM CRS based on the mean longitude/latitude
-    of one animal's locations.
+    Select a local WGS84 UTM CRS based on mean longitude/latitude.
 
-    Northern hemisphere: EPSG:326xx
-    Southern hemisphere: EPSG:327xx
+    This is Spatchat preprocessing. The move package itself requires the
+    input Move object to already use a projected coordinate system.
     """
 
-    longitudes = np.asarray(
-        longitudes,
-        dtype=float
+    lon = np.asarray(longitudes, dtype=float)
+    lat = np.asarray(latitudes, dtype=float)
+
+    lon0 = float(np.mean(lon))
+    lat0 = float(np.mean(lat))
+
+    zone = int(np.floor((lon0 + 180.0) / 6.0)) + 1
+    zone = max(1, min(60, zone))
+
+    epsg = (
+        32600 + zone
+        if lat0 >= 0
+        else 32700 + zone
     )
 
-    latitudes = np.asarray(
-        latitudes,
-        dtype=float
-    )
+    return CRS.from_epsg(epsg)
 
-    lon0 = float(
-        np.mean(longitudes)
-    )
 
-    lat0 = float(
-        np.mean(latitudes)
-    )
+# =============================================================================
+# Location error
+# =============================================================================
 
-    zone = int(
-        np.floor(
-            (lon0 + 180.0) / 6.0
-        )
-    ) + 1
+def _location_error_vector(
+    value,
+    n: int
+) -> np.ndarray:
+    """
+    Match move behavior:
+    - scalar -> repeat for every location
+    - vector -> must equal number of locations
+    """
 
-    zone = max(
-        1,
-        min(60, zone)
-    )
+    arr = np.asarray(value, dtype=float)
 
-    if lat0 >= 0:
-        epsg = 32600 + zone
+    if arr.ndim == 0:
+        arr = np.repeat(float(arr), n)
+
     else:
-        epsg = 32700 + zone
+        arr = arr.reshape(-1)
 
-    return CRS.from_epsg(
-        epsg
+        if arr.size == 1:
+            arr = np.repeat(float(arr[0]), n)
+
+    if arr.size != n:
+        raise ValueError(
+            "Location error must be a scalar or have exactly one value "
+            "for every location."
+        )
+
+    if np.any(~np.isfinite(arr)):
+        raise ValueError(
+            "Location error contains missing or non-finite values."
+        )
+
+    if np.any(arr <= 0):
+        raise ValueError(
+            "Location error values must be positive."
+        )
+
+    return arr.astype(float)
+
+
+# =============================================================================
+# Brownian motion variance
+# =============================================================================
+
+def _brownian_motion_variance(
+    time_lag_min: np.ndarray,
+    location_error: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> Tuple[float, float]:
+    """
+    Port of move::brownian.motion.variance().
+
+    Estimates Brownian motion variance by maximum likelihood using
+    alternating location triplets.
+
+    Returns
+    -------
+    bmvar
+        Maximum-likelihood Brownian motion variance.
+
+    cll
+        Maximized log likelihood.
+    """
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    err = np.asarray(location_error, dtype=float)
+    lag = np.asarray(time_lag_min, dtype=float)
+
+    n = len(x)
+
+    if not (
+        len(y) == n
+        and len(err) == n
+    ):
+        raise ValueError(
+            "Coordinate and location-error vectors must have equal length."
+        )
+
+    if n < 3:
+        raise ValueError(
+            "At least three locations are required for motion variance."
+        )
+
+    # move's R function evaluates centers 2,4,6,... in one-based indexing.
+    # In Python these are indices 1,3,5,...
+    centers = np.arange(
+        1,
+        n - 1,
+        2,
+        dtype=int
+    )
+
+    if centers.size == 0:
+        raise ValueError(
+            "Insufficient locations for Brownian motion variance estimation."
+        )
+
+    t_jump = []
+    alpha = []
+    ztz = []
+    err1 = []
+    err2 = []
+
+    for i in centers:
+
+        # Segment i-1 -> i and i -> i+1
+        dt1 = float(lag[i - 1])
+        dt2 = float(lag[i])
+
+        if (
+            not np.isfinite(dt1)
+            or not np.isfinite(dt2)
+            or dt1 <= 0
+            or dt2 <= 0
+        ):
+            continue
+
+        total_t = dt1 + dt2
+
+        a = dt1 / total_t
+
+        ux = x[i - 1] + a * (
+            x[i + 1] - x[i - 1]
+        )
+
+        uy = y[i - 1] + a * (
+            y[i + 1] - y[i - 1]
+        )
+
+        residual2 = (
+            (x[i] - ux) ** 2
+            + (y[i] - uy) ** 2
+        )
+
+        t_jump.append(total_t)
+        alpha.append(a)
+        ztz.append(residual2)
+        err1.append(err[i - 1])
+        err2.append(err[i + 1])
+
+    if not t_jump:
+        raise ValueError(
+            "No valid location triplets were available for "
+            "Brownian motion variance estimation."
+        )
+
+    t_jump = np.asarray(t_jump, dtype=float)
+    alpha = np.asarray(alpha, dtype=float)
+    ztz = np.asarray(ztz, dtype=float)
+    err1 = np.asarray(err1, dtype=float)
+    err2 = np.asarray(err2, dtype=float)
+
+    def neg_log_likelihood(bmvar: float) -> float:
+
+        if bmvar < 0:
+            return np.inf
+
+        variance = (
+            t_jump
+            * alpha
+            * (1.0 - alpha)
+            * bmvar
+            + ((1.0 - alpha) ** 2)
+            * (err1 ** 2)
+            + (alpha ** 2)
+            * (err2 ** 2)
+        )
+
+        if np.any(
+            ~np.isfinite(variance)
+            | (variance <= 0)
+        ):
+            return np.inf
+
+        # Algebraically equivalent to move's likelihood calculation,
+        # but evaluated in a numerically stable form.
+        return float(
+            np.sum(
+                np.log(
+                    2.0
+                    * math.pi
+                    * variance
+                )
+                + ztz
+                / (
+                    2.0
+                    * variance
+                )
+            )
+        )
+
+    result = minimize_scalar(
+        neg_log_likelihood,
+        bounds=(0.0, 1.0e15),
+        method="bounded",
+    )
+
+    if (
+        not result.success
+        or not np.isfinite(result.x)
+        or result.x <= 0.0
+        or result.x >= 1.0e15
+    ):
+        raise RuntimeError(
+            "Brownian motion variance optimization failed. "
+            "Consider checking coordinate units and location error."
+        )
+
+    bmvar = float(result.x)
+    cll = -float(result.fun)
+
+    return bmvar, cll
+
+
+# =============================================================================
+# Dynamic variance
+# =============================================================================
+
+def _dynamic_bm_variance(
+    x: np.ndarray,
+    y: np.ndarray,
+    time_min: np.ndarray,
+    location_error: np.ndarray,
+    window_size: int,
+    margin: int,
+) -> Dict:
+    """
+    Port of move::brownian.motion.variance.dyn().
+
+    Implements:
+      - sliding windows
+      - single-window BM variance
+      - candidate behavioral breakpoints
+      - BIC comparison
+      - segment-wise averaging across overlapping windows
+      - move-style interest mask
+    """
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    time_min = np.asarray(time_min, dtype=float)
+    location_error = np.asarray(
+        location_error,
+        dtype=float
+    )
+
+    n = len(x)
+
+    if n < window_size:
+        raise ValueError(
+            "window_size cannot be larger than the number of locations."
+        )
+
+    if window_size % 2 != 1:
+        raise ValueError(
+            "window_size must be odd."
+        )
+
+    if margin % 2 != 1:
+        raise ValueError(
+            "margin must be odd."
+        )
+
+    if window_size < 2 * margin:
+        raise ValueError(
+            "window_size must be large enough relative to margin."
+        )
+
+    # move::timeLag(..., units="mins")
+    time_lag = np.diff(
+        time_min
+    )
+
+    if np.any(
+        ~np.isfinite(time_lag)
+        | (time_lag <= 0)
+    ):
+        raise ValueError(
+            "dBBMM requires strictly increasing timestamps."
+        )
+
+    # Add one trailing NA solely so window slicing mirrors the R code.
+    time_lag_full = np.concatenate(
+        [
+            time_lag,
+            [np.nan]
+        ]
+    )
+
+    # R:
+    # breaks <- margin:(window.size - margin + 1)
+    breaks_r = np.arange(
+        margin,
+        window_size - margin + 2,
+        dtype=int
+    )
+
+    if breaks_r.size < 2:
+        raise ValueError(
+            "Margin to window ratio is not appropriate."
+        )
+
+    # Only odd candidate break locations
+    uneven_breaks_r = breaks_r[
+        breaks_r % 2 == 1
+    ]
+
+    # Each segment/location may receive estimates from several windows.
+    estimates_by_loc: List[List[float]] = [
+        []
+        for _ in range(n)
+    ]
+
+    breaks_found: List[int] = []
+
+    # Equivalent to R:
+    # 1:(n.locs(object) - window.size + 1)
+    for w0 in range(
+        0,
+        n - window_size + 1
+    ):
+
+        stop = (
+            w0
+            + window_size
+        )
+
+        x_sub = x[
+            w0:stop
+        ]
+
+        y_sub = y[
+            w0:stop
+        ]
+
+        err_sub = location_error[
+            w0:stop
+        ]
+
+        lag_sub = time_lag_full[
+            w0:stop
+        ]
+
+        # -------------------------------------------------------------
+        # Whole-window variance
+        # -------------------------------------------------------------
+
+        whole_var, whole_cll = (
+            _brownian_motion_variance(
+                lag_sub,
+                err_sub,
+                x_sub,
+                y_sub,
+            )
+        )
+
+        whole_bic = (
+            -2.0 * whole_cll
+            + math.log(
+                window_size
+            )
+        )
+
+        # -------------------------------------------------------------
+        # Search candidate change points
+        # -------------------------------------------------------------
+
+        best_break = None
+
+        for b_r in uneven_breaks_r:
+
+            # R uses 1:b and b:window.size.
+            # b_r is one-based.
+            before_stop = b_r
+
+            after_start = (
+                b_r - 1
+            )
+
+            try:
+
+                before_var, before_cll = (
+                    _brownian_motion_variance(
+                        lag_sub[
+                            :before_stop
+                        ],
+                        err_sub[
+                            :before_stop
+                        ],
+                        x_sub[
+                            :before_stop
+                        ],
+                        y_sub[
+                            :before_stop
+                        ],
+                    )
+                )
+
+                after_var, after_cll = (
+                    _brownian_motion_variance(
+                        lag_sub[
+                            after_start:
+                        ],
+                        err_sub[
+                            after_start:
+                        ],
+                        x_sub[
+                            after_start:
+                        ],
+                        y_sub[
+                            after_start:
+                        ],
+                    )
+                )
+
+            except (
+                ValueError,
+                RuntimeError
+            ):
+                continue
+
+            break_bic = (
+                -2.0
+                * (
+                    before_cll
+                    + after_cll
+                )
+                + 2.0
+                * math.log(
+                    window_size
+                )
+            )
+
+            if (
+                best_break is None
+                or break_bic
+                < best_break["bic"]
+            ):
+
+                best_break = {
+                    "b_r": int(b_r),
+                    "before_var": float(
+                        before_var
+                    ),
+                    "after_var": float(
+                        after_var
+                    ),
+                    "bic": float(
+                        break_bic
+                    ),
+                }
+
+        # -------------------------------------------------------------
+        # Select whole-window versus broken-window solution
+        # -------------------------------------------------------------
+
+        if (
+            best_break is not None
+            and best_break["bic"]
+            < whole_bic
+        ):
+
+            b_r = best_break[
+                "b_r"
+            ]
+
+            n_before = int(
+                np.sum(
+                    breaks_r
+                    < b_r
+                )
+            )
+
+            n_after = int(
+                np.sum(
+                    breaks_r
+                    > b_r
+                )
+            )
+
+            window_variance = np.concatenate(
+                [
+                    np.repeat(
+                        best_break[
+                            "before_var"
+                        ],
+                        n_before
+                    ),
+                    np.repeat(
+                        best_break[
+                            "after_var"
+                        ],
+                        n_after
+                    ),
+                ]
+            )
+
+            # R: w - 1 + breakWindow$b
+            # Convert to Python zero-based index.
+            breaks_found.append(
+                int(
+                    w0
+                    + b_r
+                    - 1
+                )
+            )
+
+        else:
+
+            window_variance = np.repeat(
+                whole_var,
+                breaks_r.size - 1
+            )
+
+        # -------------------------------------------------------------
+        # R:
+        # loc = w - 1 + margin:(window.size-margin)
+        #
+        # With zero-based Python indexes:
+        # w0 + margin-1 ... w0 + window_size-margin-1
+        # -------------------------------------------------------------
+
+        locs = np.arange(
+            w0 + margin - 1,
+            w0 + window_size - margin,
+            dtype=int
+        )
+
+        if (
+            window_variance.size
+            != locs.size
+        ):
+            raise RuntimeError(
+                "Internal dBBMM variance alignment error."
+            )
+
+        for loc, value in zip(
+            locs,
+            window_variance
+        ):
+
+            estimates_by_loc[
+                int(loc)
+            ].append(
+                float(value)
+            )
+
+    # -------------------------------------------------------------------------
+    # Aggregate overlapping windows exactly as move does
+    # -------------------------------------------------------------------------
+
+    means = np.full(
+        n,
+        np.nan,
+        dtype=float
+    )
+
+    in_windows = np.full(
+        n,
+        np.nan,
+        dtype=float
+    )
+
+    counts = np.array(
+        [
+            len(v)
+            for v
+            in estimates_by_loc
+        ],
+        dtype=int
+    )
+
+    valid_locations = np.where(
+        counts > 0
+    )[0]
+
+    if valid_locations.size == 0:
+        raise RuntimeError(
+            "No dynamic Brownian variance estimates were produced."
+        )
+
+    for loc in valid_locations:
+
+        vals = np.asarray(
+            estimates_by_loc[
+                int(loc)
+            ],
+            dtype=float
+        )
+
+        means[
+            loc
+        ] = float(
+            np.mean(
+                vals
+            )
+        )
+
+        in_windows[
+            loc
+        ] = float(
+            len(vals)
+        )
+
+    max_count = int(
+        np.max(
+            counts[
+                valid_locations
+            ]
+        )
+    )
+
+    interest = (
+        counts
+        == max_count
+    )
+
+    # Last location is not a movement segment.
+    interest[-1] = False
+
+    return {
+        "means": means,
+        "in_windows": in_windows,
+        "interest": interest,
+        "breaks": breaks_found,
+    }
+
+
+# =============================================================================
+# Raster grid matching move
+# =============================================================================
+
+def _move_grid(
+    x: np.ndarray,
+    y: np.ndarray,
+    cell_size: float,
+    ext: float,
+):
+    """
+    Reproduce move's .extcalc() + numeric-raster construction.
+
+    move's scalar ext expands each side by:
+        coordinate_range * ext
+
+    It then symmetrically adjusts the expanded extent so that an exact
+    integer number of square cells fits.
+    """
+
+    if cell_size <= 0:
+        raise ValueError(
+            "Raster resolution must be positive."
+        )
+
+    if ext < 0:
+        raise ValueError(
+            "ext must be non-negative."
+        )
+
+    xmin0 = float(
+        np.min(x)
+    )
+
+    xmax0 = float(
+        np.max(x)
+    )
+
+    ymin0 = float(
+        np.min(y)
+    )
+
+    ymax0 = float(
+        np.max(y)
+    )
+
+    x_range0 = (
+        xmax0 - xmin0
+    )
+
+    y_range0 = (
+        ymax0 - ymin0
+    )
+
+    # move::.extcalc
+    range_xmin = (
+        xmin0
+        - x_range0
+        * ext
+    )
+
+    range_xmax = (
+        xmax0
+        + x_range0
+        * ext
+    )
+
+    range_ymin = (
+        ymin0
+        - y_range0
+        * ext
+    )
+
+    range_ymax = (
+        ymax0
+        + y_range0
+        * ext
+    )
+
+    x_range = (
+        range_xmax
+        - range_xmin
+    )
+
+    y_range = (
+        range_ymax
+        - range_ymin
+    )
+
+    ncol = int(
+        math.ceil(
+            x_range
+            / cell_size
+        )
+    )
+
+    nrow = int(
+        math.ceil(
+            y_range
+            / cell_size
+        )
+    )
+
+    # Symmetric padding so square cells fit exactly.
+    extra_x = (
+        ncol
+        * cell_size
+        - x_range
+    )
+
+    extra_y = (
+        nrow
+        * cell_size
+        - y_range
+    )
+
+    xmin = (
+        range_xmin
+        - extra_x / 2.0
+    )
+
+    xmax = (
+        range_xmax
+        + extra_x / 2.0
+    )
+
+    ymin = (
+        range_ymin
+        - extra_y / 2.0
+    )
+
+    ymax = (
+        range_ymax
+        + extra_y / 2.0
+    )
+
+    # Cell centers, analogous to xFromCol() / yFromRow()
+    x_grid = (
+        xmin
+        + (
+            np.arange(
+                ncol,
+                dtype=float
+            )
+            + 0.5
+        )
+        * cell_size
+    )
+
+    # Ascending south -> north, as passed to move's dbbmm2.
+    y_grid = (
+        ymin
+        + (
+            np.arange(
+                nrow,
+                dtype=float
+            )
+            + 0.5
+        )
+        * cell_size
+    )
+
+    return {
+        "xmin": xmin,
+        "xmax": xmax,
+        "ymin": ymin,
+        "ymax": ymax,
+        "ncol": ncol,
+        "nrow": nrow,
+        "x_grid": x_grid,
+        "y_grid": y_grid,
+    }
+
+
+# =============================================================================
+# dBBMM grid evaluator
+# =============================================================================
+
+def _dbbmm_grid(
+    x: np.ndarray,
+    y: np.ndarray,
+    time_min: np.ndarray,
+    means: np.ndarray,
+    interest: np.ndarray,
+    location_error: np.ndarray,
+    grid: Dict,
+    time_step_min: float,
+    sd_extent: float = 4.0,
+) -> np.ndarray:
+    """
+    Python implementation of move's dbbmm2 C kernel.
+
+    Key parity details:
+      - integration starts at half the remainder of total duration / time.step
+      - segment interpolation uses alpha in time
+      - variance equation matches dbbmm2
+      - probability is only evaluated within 4 SD
+      - each Gaussian density is multiplied by raster cell area
+      - final raster is normalized so all cells sum to 1
+    """
+
+    x = np.asarray(
+        x,
+        dtype=float
+    )
+
+    y = np.asarray(
+        y,
+        dtype=float
+    )
+
+    t = np.asarray(
+        time_min,
+        dtype=float
+    )
+
+    means = np.asarray(
+        means,
+        dtype=float
+    )
+
+    interest = np.asarray(
+        interest,
+        dtype=bool
+    )
+
+    location_error = np.asarray(
+        location_error,
+        dtype=float
+    )
+
+    x_grid = grid[
+        "x_grid"
+    ]
+
+    y_grid = grid[
+        "y_grid"
+    ]
+
+    nx = len(
+        x_grid
+    )
+
+    ny = len(
+        y_grid
+    )
+
+    if (
+        nx < 1
+        or ny < 1
+    ):
+        raise ValueError(
+            "dBBMM raster contains no cells."
+        )
+
+    if time_step_min <= 0:
+        raise ValueError(
+            "time_step_min must be positive."
+        )
+
+    x_res = (
+        float(
+            x_grid[1]
+            - x_grid[0]
+        )
+        if nx > 1
+        else float(
+            grid["xmax"]
+            - grid["xmin"]
+        )
+    )
+
+    y_res = (
+        float(
+            y_grid[1]
+            - y_grid[0]
+        )
+        if ny > 1
+        else float(
+            grid["ymax"]
+            - grid["ymin"]
+        )
+    )
+
+    cell_area = (
+        x_res
+        * y_res
+    )
+
+    # Work internally with y ascending south -> north.
+    ud_asc = np.zeros(
+        (
+            ny,
+            nx
+        ),
+        dtype=np.float64
+    )
+
+    total_duration = (
+        t[-1]
+        - t[0]
+    )
+
+    # C:
+    # ti = t0 + fmod((t_last - t0), dT)/2
+    remainder = math.fmod(
+        total_duration,
+        time_step_min
+    )
+
+    ti = (
+        t[0]
+        + remainder / 2.0
+    )
+
+    k = 0
+
+    while ti <= t[-1] + 1e-12:
+
+        while (
+            k + 1
+            < len(t) - 1
+            and t[
+                k + 1
+            ]
+            < ti
+        ):
+            k += 1
+
+        if (
+            k >= len(t) - 1
+        ):
+            break
+
+        if (
+            interest[k]
+            and np.isfinite(
+                means[k]
+            )
+        ):
+
+            segment_dt = (
+                t[k + 1]
+                - t[k]
+            )
+
+            if segment_dt <= 0:
+                raise ValueError(
+                    "dBBMM encountered a non-positive time interval."
+                )
+
+            alpha = (
+                ti
+                - t[k]
+            ) / segment_dt
+
+            mux = (
+                x[k]
+                + (
+                    x[k + 1]
+                    - x[k]
+                )
+                * alpha
+            )
+
+            muy = (
+                y[k]
+                + (
+                    y[k + 1]
+                    - y[k]
+                )
+                * alpha
+            )
+
+            sigma = (
+                segment_dt
+                * alpha
+                * (
+                    1.0
+                    - alpha
+                )
+                * means[k]
+                + (
+                    (
+                        1.0
+                        - alpha
+                    )
+                    ** 2
+                )
+                * (
+                    location_error[k]
+                    ** 2
+                )
+                + (
+                    alpha
+                    ** 2
+                )
+                * (
+                    location_error[
+                        k + 1
+                    ]
+                    ** 2
+                )
+            )
+
+            if (
+                np.isfinite(
+                    sigma
+                )
+                and sigma > 0
+            ):
+
+                sd = math.sqrt(
+                    sigma
+                )
+
+                radius = (
+                    sd_extent
+                    * sd
+                )
+
+                # ---------------------------------------------------------
+                # Match move behavior: the raster must contain the full
+                # requested 4-SD computation neighborhood.
+                # ---------------------------------------------------------
+
+                if (
+                    mux - radius
+                    < x_grid[0]
+                ):
+                    raise ValueError(
+                        "Lower x grid not large enough; increase ext."
+                    )
+
+                if (
+                    mux + radius
+                    > x_grid[-1]
+                ):
+                    raise ValueError(
+                        "Higher x grid not large enough; increase ext."
+                    )
+
+                if (
+                    muy - radius
+                    < y_grid[0]
+                ):
+                    raise ValueError(
+                        "Lower y grid not large enough; increase ext."
+                    )
+
+                if (
+                    muy + radius
+                    > y_grid[-1]
+                ):
+                    raise ValueError(
+                        "Higher y grid not large enough; increase ext."
+                    )
+
+                # Candidate cells within +/- 4 SD.
+                ix0 = max(
+                    0,
+                    int(
+                        np.searchsorted(
+                            x_grid,
+                            mux - radius,
+                            side="left"
+                        )
+                    )
+                )
+
+                ix1 = min(
+                    nx,
+                    int(
+                        np.searchsorted(
+                            x_grid,
+                            mux + radius,
+                            side="right"
+                        )
+                    )
+                )
+
+                iy0 = max(
+                    0,
+                    int(
+                        np.searchsorted(
+                            y_grid,
+                            muy - radius,
+                            side="left"
+                        )
+                    )
+                )
+
+                iy1 = min(
+                    ny,
+                    int(
+                        np.searchsorted(
+                            y_grid,
+                            muy + radius,
+                            side="right"
+                        )
+                    )
+                )
+
+                if (
+                    ix1 > ix0
+                    and iy1 > iy0
+                ):
+
+                    xx = x_grid[
+                        ix0:ix1
+                    ]
+
+                    yy = y_grid[
+                        iy0:iy1
+                    ]
+
+                    XX, YY = np.meshgrid(
+                        xx,
+                        yy
+                    )
+
+                    ztz = (
+                        (
+                            XX
+                            - mux
+                        )
+                        ** 2
+                        + (
+                            YY
+                            - muy
+                        )
+                        ** 2
+                    )
+
+                    kernel_mass = (
+                        (
+                            1.0
+                            / (
+                                2.0
+                                * math.pi
+                                * sigma
+                            )
+                        )
+                        * np.exp(
+                            -ztz
+                            / (
+                                2.0
+                                * sigma
+                            )
+                        )
+                        * cell_area
+                    )
+
+                    ud_asc[
+                        iy0:iy1,
+                        ix0:ix1
+                    ] += kernel_mass
+
+        ti += (
+            time_step_min
+        )
+
+    total = float(
+        np.sum(
+            ud_asc
+        )
+    )
+
+    if (
+        not np.isfinite(
+            total
+        )
+        or total <= 0
+    ):
+        raise RuntimeError(
+            "dBBMM utilization distribution has zero probability mass."
+        )
+
+    # move:
+    # ans <- ans / sum(ans)
+    ud_asc /= total
+
+    # GeoTIFF rows run north -> south.
+    return np.flipud(
+        ud_asc
     )
 
 
-# -----------------------------------------------------------------------------
-# Main dBBMM function
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Isopleths
+# =============================================================================
+
+def _extract_isopleths(
+    ud: np.ndarray,
+    transform: Affine,
+    cell_area_m2: float,
+    levels: Sequence[int],
+    reproj_geom,
+) -> List[Dict]:
+    """
+    Extract highest-use UD regions from a raster whose cell values sum to 1.
+    """
+
+    flat = np.asarray(
+        ud,
+        dtype=float
+    ).ravel()
+
+    valid = np.isfinite(
+        flat
+    )
+
+    flat_valid = flat[
+        valid
+    ]
+
+    if flat_valid.size == 0:
+        return []
+
+    order = np.argsort(
+        flat_valid
+    )[::-1]
+
+    sorted_prob = flat_valid[
+        order
+    ]
+
+    cumulative = np.cumsum(
+        sorted_prob
+    )
+
+    results: List[Dict] = []
+
+    for percent in sorted(
+        {
+            int(v)
+            for v
+            in levels
+            if 1
+            <= int(v)
+            <= 100
+        }
+    ):
+
+        target = (
+            percent
+            / 100.0
+        )
+
+        idx = int(
+            np.searchsorted(
+                cumulative,
+                target,
+                side="left"
+            )
+        )
+
+        idx = min(
+            idx,
+            len(
+                sorted_prob
+            )
+            - 1
+        )
+
+        threshold = float(
+            sorted_prob[
+                idx
+            ]
+        )
+
+        mask = (
+            ud
+            >= threshold
+        ).astype(
+            np.uint8
+        )
+
+        polygons: List[
+            Polygon
+        ] = []
+
+        for geom, val in rio_shapes(
+            mask,
+            mask=mask.astype(
+                bool
+            ),
+            transform=transform
+        ):
+
+            if int(val) != 1:
+                continue
+
+            poly = shp_shape(
+                geom
+            )
+
+            if (
+                not poly.is_empty
+                and poly.area > 0
+            ):
+                polygons.append(
+                    poly
+                )
+
+        if not polygons:
+            continue
+
+        merged = unary_union(
+            polygons
+        )
+
+        if not isinstance(
+            merged,
+            (
+                Polygon,
+                MultiPolygon
+            )
+        ):
+            continue
+
+        area_sq_km = float(
+            merged.area
+            / 1e6
+        )
+
+        geom_wgs = reproj_geom(
+            merged
+        )
+
+        results.append(
+            {
+                "percent": int(
+                    percent
+                ),
+                "area_sq_km": (
+                    area_sq_km
+                ),
+                "geometry": (
+                    shp_mapping(
+                        geom_wgs
+                    )
+                ),
+            }
+        )
+
+    return results
+
+
+# =============================================================================
+# Public function
+# =============================================================================
 
 def compute_dbbmm(
     df: pd.DataFrame,
@@ -114,50 +1517,75 @@ def compute_dbbmm(
     x_col: str,
     y_col: str,
     ts_col: str,
-    params: Optional[DBBMMParams] = None,
+    params: Optional[
+        DBBMMParams
+    ] = None,
     outputs_dir: str = "outputs",
-) -> Dict[str, DBBMMResult]:
+) -> Dict[
+    str,
+    DBBMMResult
+]:
     """
-    Compute dBBMM per animal using a local UTM meter grid.
+    Compute dBBMMs using calculations designed to closely reproduce
+    move::brownian.bridge.dyn().
 
-    Input coordinates are expected to be WGS84 longitude/latitude.
-
-    For each animal:
-      1. A local UTM CRS is selected from the animal's mean location.
-      2. All movement distances, velocities, Brownian bridge calculations,
-         raster operations, and area calculations are performed in meters.
-      3. The GeoTIFF is written in the projected UTM CRS.
-      4. Final isopleth geometries are transformed back to WGS84
-         for web mapping.
-
-    Returns
-    -------
-    {
-        animal_id: DBBMMResult(
-            geotiff=<projected GeoTIFF>,
-            isopleths=[
-                {
-                    "percent": int,
-                    "area_sq_km": float,
-                    "geometry": <GeoJSON WGS84>,
-                    "analysis_crs": str
-                },
-                ...
-            ]
-        )
-    }
+    Spatchat accepts longitude/latitude input and automatically projects
+    each animal to a local UTM coordinate system before running the
+    move-style calculations.
     """
 
     if params is None:
         params = DBBMMParams()
 
     # -------------------------------------------------------------------------
-    # Normalize input data
+    # Parameter checks
+    # -------------------------------------------------------------------------
+
+    window_size = int(
+        params.window_size
+    )
+
+    margin = int(
+        params.margin
+    )
+
+    if window_size % 2 != 1:
+        raise ValueError(
+            "window_size must be odd."
+        )
+
+    if margin % 2 != 1:
+        raise ValueError(
+            "margin must be odd."
+        )
+
+    if window_size < 2 * margin:
+        raise ValueError(
+            "window_size must be at least twice margin."
+        )
+
+    raster_res = float(
+        params.raster_resolution_m
+    )
+
+    if raster_res <= 0:
+        raise ValueError(
+            "raster_resolution_m must be positive."
+        )
+
+    ext = float(
+        params.ext
+    )
+
+    # -------------------------------------------------------------------------
+    # Input preparation
     # -------------------------------------------------------------------------
 
     if id_col not in df.columns:
         df = df.copy()
-        df[id_col] = "Animal_1"
+        df[
+            id_col
+        ] = "Animal_1"
 
     required = {
         id_col,
@@ -172,21 +1600,18 @@ def compute_dbbmm(
 
     if missing:
         raise ValueError(
-            f"dBBMM missing required columns: {sorted(missing)}"
+            f"dBBMM missing required columns: "
+            f"{sorted(missing)}"
         )
 
-    df0 = (
-        df[
-            [
-                id_col,
-                x_col,
-                y_col,
-                ts_col,
-            ]
+    df0 = df[
+        [
+            id_col,
+            x_col,
+            y_col,
+            ts_col,
         ]
-        .dropna()
-        .copy()
-    )
+    ].copy()
 
     df0.columns = [
         "animal_id",
@@ -195,19 +1620,32 @@ def compute_dbbmm(
         "timestamp",
     ]
 
-    df0["lon"] = pd.to_numeric(
-        df0["lon"],
+    df0[
+        "lon"
+    ] = pd.to_numeric(
+        df0[
+            "lon"
+        ],
         errors="coerce"
     )
 
-    df0["lat"] = pd.to_numeric(
-        df0["lat"],
+    df0[
+        "lat"
+    ] = pd.to_numeric(
+        df0[
+            "lat"
+        ],
         errors="coerce"
     )
 
-    df0["timestamp"] = pd.to_datetime(
-        df0["timestamp"],
-        errors="coerce"
+    df0[
+        "timestamp"
+    ] = pd.to_datetime(
+        df0[
+            "timestamp"
+        ],
+        errors="coerce",
+        utc=True,
     )
 
     df0 = df0.dropna(
@@ -218,26 +1656,28 @@ def compute_dbbmm(
         ]
     )
 
-    results: Dict[
-        str,
-        DBBMMResult
-    ] = {}
-
     os.makedirs(
         outputs_dir,
         exist_ok=True
     )
 
+    results: Dict[
+        str,
+        DBBMMResult
+    ] = {}
+
     # -------------------------------------------------------------------------
-    # Analyze each animal separately
+    # Animal-by-animal analysis
     # -------------------------------------------------------------------------
 
     for animal, sub in df0.groupby(
-        "animal_id"
+        "animal_id",
+        sort=False
     ):
 
         sub = (
-            sub.sort_values(
+            sub
+            .sort_values(
                 "timestamp"
             )
             .reset_index(
@@ -245,31 +1685,48 @@ def compute_dbbmm(
             )
         )
 
-        if len(sub) < 2:
+        n = len(
+            sub
+        )
+
+        if n < window_size:
+            # Same fundamental constraint as move variance calculation.
             continue
 
         # ---------------------------------------------------------------------
-        # Select local UTM CRS for this animal
+        # Projection
         # ---------------------------------------------------------------------
 
-        projected_crs = _local_utm_crs(
-            sub["lon"].values,
-            sub["lat"].values
+        projected_crs = (
+            _local_utm_crs(
+                sub[
+                    "lon"
+                ].values,
+                sub[
+                    "lat"
+                ].values,
+            )
         )
 
-        to_proj = Transformer.from_crs(
-            "EPSG:4326",
-            projected_crs,
-            always_xy=True
+        to_proj = (
+            Transformer.from_crs(
+                "EPSG:4326",
+                projected_crs,
+                always_xy=True,
+            )
         )
 
-        to_wgs = Transformer.from_crs(
-            projected_crs,
-            "EPSG:4326",
-            always_xy=True
+        to_wgs = (
+            Transformer.from_crs(
+                projected_crs,
+                "EPSG:4326",
+                always_xy=True,
+            )
         )
 
-        def reproj_geom(geom):
+        def reproj_geom(
+            geom
+        ):
             return shp_transform(
                 lambda x, y, z=None:
                     to_wgs.transform(
@@ -279,631 +1736,219 @@ def compute_dbbmm(
                 geom
             )
 
-        # ---------------------------------------------------------------------
-        # Project lon/lat to UTM meters
-        # ---------------------------------------------------------------------
-
-        xs, ys = to_proj.transform(
-            sub["lon"].values,
-            sub["lat"].values
-        )
-
-        xs = np.asarray(
-            xs,
-            dtype=float
-        )
-
-        ys = np.asarray(
-            ys,
-            dtype=float
-        )
-
-        ts = (
-            sub["timestamp"]
-            .astype("int64")
-            .to_numpy()
-            / 1e9
-        )
-
-        # ---------------------------------------------------------------------
-        # Drop zero or negative time gaps
-        # ---------------------------------------------------------------------
-
-        dt = np.diff(
-            ts
-        )
-
-        valid = (
-            dt > 0
-        )
-
-        if not np.all(valid):
-
-            keep_idx = np.insert(
-                valid,
-                0,
-                True
-            )
-
-            xs = xs[
-                keep_idx
-            ]
-
-            ys = ys[
-                keep_idx
-            ]
-
-            ts = ts[
-                keep_idx
-            ]
-
-            if len(xs) < 2:
-                continue
-
-            dt = np.diff(
-                ts
-            )
-
-        # ---------------------------------------------------------------------
-        # Movement steps and velocity
-        # ---------------------------------------------------------------------
-
-        coords = np.column_stack(
-            [
-                xs,
-                ys
-            ]
-        )
-
-        steps = np.diff(
-            coords,
-            axis=0
-        )
-
-        d = np.hypot(
-            steps[:, 0],
-            steps[:, 1]
-        )
-
-        v = (
-            d
-            / np.maximum(
-                dt,
-                1e-6
-            )
-        )
-
-        # ---------------------------------------------------------------------
-        # Rolling variance of velocity
-        # ---------------------------------------------------------------------
-
-        w = int(
-            max(
-                5,
-                (
-                    params.window_size
-                    if params.window_size % 2 == 1
-                    else params.window_size + 1
-                )
-            )
-        )
-
-        pad = (
-            w // 2
-        )
-
-        v_pad = np.pad(
-            v,
-            (
-                pad,
-                pad
+        x, y = to_proj.transform(
+            sub[
+                "lon"
+            ].to_numpy(
+                dtype=float
             ),
-            mode="edge"
+            sub[
+                "lat"
+            ].to_numpy(
+                dtype=float
+            ),
         )
 
-        v2 = (
-            pd.Series(
-                v_pad
-            )
-            .rolling(
-                window=w,
-                center=True,
-                min_periods=max(
-                    5,
-                    w // 3
-                )
-            )
-            .var()
-            .to_numpy()[
-                pad:-pad
+        x = np.asarray(
+            x,
+            dtype=float
+        )
+
+        y = np.asarray(
+            y,
+            dtype=float
+        )
+
+        # Relative time in MINUTES, matching move.
+        timestamp_ns = (
+            sub[
+                "timestamp"
             ]
-        )
-
-        if len(v2) != len(v):
-            v2 = np.resize(
-                v2,
-                len(v)
+            .astype(
+                "int64"
             )
-
-        baseline_var_v = (
-            params.raster_resolution_m
-            / 5.0
-        ) ** 2
-
-        v2 = np.where(
-            np.isfinite(v2)
-            & (v2 > 0),
-            v2,
-            baseline_var_v
+            .to_numpy()
         )
 
-        T = dt
-        sigma2 = v2
+        time_min = (
+            timestamp_ns
+            - timestamp_ns[0]
+        ) / (
+            60.0
+            * 1e9
+        )
+
+        time_lag = np.diff(
+            time_min
+        )
+
+        if np.any(
+            ~np.isfinite(
+                time_lag
+            )
+            | (
+                time_lag
+                <= 0
+            )
+        ):
+            raise ValueError(
+                f"dBBMM for animal {animal} requires "
+                "strictly increasing unique timestamps."
+            )
 
         # ---------------------------------------------------------------------
-        # Raster grid in local UTM coordinates
+        # Location error
         # ---------------------------------------------------------------------
 
-        res = float(
-            params.raster_resolution_m
-        )
-
-        buf = float(
-            params.buffer_m
-        )
-
-        minx = float(
-            np.min(xs)
-            - buf
-        )
-
-        maxx = float(
-            np.max(xs)
-            + buf
-        )
-
-        miny = float(
-            np.min(ys)
-            - buf
-        )
-
-        maxy = float(
-            np.max(ys)
-            + buf
-        )
-
-        width = int(
-            max(
-                1,
-                math.ceil(
-                    (maxx - minx)
-                    / res
-                )
+        location_error = (
+            _location_error_vector(
+                params.location_error_m,
+                n,
             )
         )
 
-        height = int(
-            max(
-                1,
-                math.ceil(
-                    (maxy - miny)
-                    / res
-                )
+        # ---------------------------------------------------------------------
+        # Dynamic Brownian variance
+        # ---------------------------------------------------------------------
+
+        variance = (
+            _dynamic_bm_variance(
+                x=x,
+                y=y,
+                time_min=time_min,
+                location_error=location_error,
+                window_size=window_size,
+                margin=margin,
             )
+        )
+
+        means = variance[
+            "means"
+        ]
+
+        interest = variance[
+            "interest"
+        ]
+
+        # ---------------------------------------------------------------------
+        # move-style integration time step
+        # ---------------------------------------------------------------------
+
+        if (
+            params.time_step_min
+            is None
+        ):
+
+            time_step_min = (
+                float(
+                    np.min(
+                        time_lag
+                    )
+                )
+                / 15.0
+            )
+
+        else:
+
+            time_step_min = float(
+                params.time_step_min
+            )
+
+        if (
+            not np.isfinite(
+                time_step_min
+            )
+            or time_step_min <= 0
+        ):
+            raise ValueError(
+                "time_step_min must be positive."
+            )
+
+        # ---------------------------------------------------------------------
+        # move-style raster
+        # ---------------------------------------------------------------------
+
+        grid = _move_grid(
+            x=x,
+            y=y,
+            cell_size=raster_res,
+            ext=ext,
         )
 
         transform = (
             Affine.translation(
-                minx,
-                maxy
+                grid[
+                    "xmin"
+                ],
+                grid[
+                    "ymax"
+                ],
             )
             * Affine.scale(
-                res,
-                -res
+                raster_res,
+                -raster_res,
             )
         )
 
         # ---------------------------------------------------------------------
-        # World -> raster col,row
+        # Computational size, analogous to move's message
         # ---------------------------------------------------------------------
 
-        def world_to_cr(
-            x: float,
-            y: float
-        ) -> Tuple[
-            float,
-            float
-        ]:
-
-            c = (
-                x - minx
-            ) / res
-
-            r = (
-                maxy - y
-            ) / res
-
-            return c, r
-
-        # ---------------------------------------------------------------------
-        # Initialize UD
-        # ---------------------------------------------------------------------
-
-        UD = np.zeros(
-            (
-                height,
-                width
-            ),
-            dtype=np.float64
-        )
-
-        cell_area = (
-            res
-            * res
-        )
-
-        nseg = len(
-            steps
-        )
-
-        n_sub = int(
-            max(
-                5,
-                params.n_substeps
+        total_interest_time = float(
+            np.sum(
+                time_lag[
+                    interest[
+                        :len(
+                            time_lag
+                        )
+                    ]
+                ]
             )
         )
 
-        loc_err2 = (
-            float(
-                params.location_error_m
-            )
-            ** 2
-        )
-
-        # ---------------------------------------------------------------------
-        # Brownian bridge accumulation
-        # ---------------------------------------------------------------------
-
-        updated_windows = 0
-
-        for i in range(
-            nseg
-        ):
-
-            x0, y0 = coords[i]
-
-            x1, y1 = coords[
-                i + 1
+        computational_size = (
+            grid[
+                "nrow"
             ]
-
-            Ti = max(
-                T[i],
-                1e-3
-            )
-
-            sig2 = max(
-                sigma2[i],
-                (
-                    params.raster_resolution_m
-                    / 10.0
-                )
-                ** 2
-            )
-
-            # -------------------------------------------------------------
-            # Spatial window around segment
-            # -------------------------------------------------------------
-
-            seg_len = max(
-                1.0,
-                np.hypot(
-                    x1 - x0,
-                    y1 - y0
-                )
-            )
-
-            sigma_max = math.sqrt(
-                loc_err2
-                + sig2
-                * (
-                    0.25
-                    * Ti
-                )
-            )
-
-            radius = (
-                3.0
-                * (
-                    sigma_max
-                    + 0.5
-                    * seg_len
-                )
-            )
-
-            minx_w = (
-                min(
-                    x0,
-                    x1
-                )
-                - radius
-            )
-
-            maxx_w = (
-                max(
-                    x0,
-                    x1
-                )
-                + radius
-            )
-
-            miny_w = (
-                min(
-                    y0,
-                    y1
-                )
-                - radius
-            )
-
-            maxy_w = (
-                max(
-                    y0,
-                    y1
-                )
-                + radius
-            )
-
-            # -------------------------------------------------------------
-            # Convert spatial window to raster indices
-            # -------------------------------------------------------------
-
-            c0f, r_topf = world_to_cr(
-                minx_w,
-                maxy_w
-            )
-
-            c1f, r_botf = world_to_cr(
-                maxx_w,
-                miny_w
-            )
-
-            c0 = int(
-                max(
-                    0,
-                    math.floor(
-                        min(
-                            c0f,
-                            c1f
-                        )
-                    )
-                )
-            )
-
-            c1 = int(
-                min(
-                    width - 1,
-                    math.ceil(
-                        max(
-                            c0f,
-                            c1f
-                        )
-                    )
-                )
-            )
-
-            r0 = int(
-                max(
-                    0,
-                    math.floor(
-                        min(
-                            r_topf,
-                            r_botf
-                        )
-                    )
-                )
-            )
-
-            r1 = int(
-                min(
-                    height - 1,
-                    math.ceil(
-                        max(
-                            r_topf,
-                            r_botf
-                        )
-                    )
-                )
-            )
-
-            if (
-                r1 < r0
-                or c1 < c0
-            ):
-                continue
-
-            # -------------------------------------------------------------
-            # Substep positions along segment
-            # -------------------------------------------------------------
-
-            ss = np.linspace(
-                0.0,
-                1.0,
-                n_sub,
-                endpoint=True
-            )
-
-            xs_sub = (
-                x0
-                + ss
-                * (
-                    x1 - x0
-                )
-            )
-
-            ys_sub = (
-                y0
-                + ss
-                * (
-                    y1 - y0
-                )
-            )
-
-            # -------------------------------------------------------------
-            # Pixel-center coordinates
-            # -------------------------------------------------------------
-
-            rows = np.arange(
-                r0,
-                r1 + 1
-            )
-
-            cols = np.arange(
-                c0,
-                c1 + 1
-            )
-
-            if (
-                rows.size == 0
-                or cols.size == 0
-            ):
-                continue
-
-            xx = (
-                minx
-                + (
-                    cols
-                    + 0.5
-                )
-                * res
-            )
-
-            yy = (
-                maxy
-                - (
-                    rows
-                    + 0.5
-                )
-                * res
-            )
-
-            XX, YY = np.meshgrid(
-                xx,
-                yy
-            )
-
-            # -------------------------------------------------------------
-            # Accumulate Gaussian kernels
-            # -------------------------------------------------------------
-
-            for (
-                x_s,
-                y_s,
-                s
-            ) in zip(
-                xs_sub,
-                ys_sub,
-                ss
-            ):
-
-                var_s = (
-                    loc_err2
-                    + sig2
-                    * (
-                        s
-                        * (
-                            1.0 - s
-                        )
-                        * Ti
-                    )
-                )
-
-                if var_s <= 0:
-                    continue
-
-                dx = (
-                    XX - x_s
-                )
-
-                dy = (
-                    YY - y_s
-                )
-
-                inv_two = (
-                    1.0
-                    / (
-                        2.0
-                        * var_s
-                    )
-                )
-
-                kernel = (
-                    np.exp(
-                        -(
-                            dx * dx
-                            + dy * dy
-                        )
-                        * inv_two
-                    )
-                    / (
-                        2.0
-                        * math.pi
-                        * var_s
-                    )
-                )
-
-                UD[
-                    rows[:, None],
-                    cols[None, :]
-                ] += kernel
-
-            updated_windows += 1
-
-        # ---------------------------------------------------------------------
-        # Debug before normalization
-        # ---------------------------------------------------------------------
-
-        nz = int(
-            np.count_nonzero(
-                UD
+            * grid[
+                "ncol"
+            ]
+            * (
+                total_interest_time
+                / time_step_min
             )
         )
 
         print(
             f"[dBBMM] animal={animal} "
-            f"pre-norm UD stats: "
-            f"sum={UD.sum() * cell_area:.6e}, "
-            f"max={UD.max():.6e}, "
-            f"nonzero={nz}/{UD.size}, "
-            f"windows={updated_windows}, "
-            f"crs={projected_crs.to_string()}"
+            f"Computational size: "
+            f"{computational_size:.1e}"
         )
 
         # ---------------------------------------------------------------------
-        # Normalize UD
+        # Brownian bridge UD
         # ---------------------------------------------------------------------
 
-        total = (
-            UD.sum()
-            * cell_area
+        ud = _dbbmm_grid(
+            x=x,
+            y=y,
+            time_min=time_min,
+            means=means,
+            interest=interest,
+            location_error=location_error,
+            grid=grid,
+            time_step_min=time_step_min,
+            sd_extent=4.0,
         )
-
-        if total > 0:
-
-            UD /= total
-
-        else:
-
-            print(
-                f"[dBBMM] animal={animal} "
-                f"WARNING: UD total mass is zero; "
-                f"check timestamps/units."
-            )
 
         # ---------------------------------------------------------------------
         # Write projected GeoTIFF
         # ---------------------------------------------------------------------
 
         safe_animal = (
-            str(animal)
+            str(
+                animal
+            )
             .replace(
                 " ",
                 "_"
@@ -923,8 +1968,8 @@ def compute_dbbmm(
             tif_path,
             "w",
             driver="GTiff",
-            height=UD.shape[0],
-            width=UD.shape[1],
+            height=ud.shape[0],
+            width=ud.shape[1],
             count=1,
             dtype=rasterio.float32,
             crs=projected_crs.to_wkt(),
@@ -933,187 +1978,71 @@ def compute_dbbmm(
         ) as dst:
 
             dst.write(
-                UD.astype(
+                ud.astype(
                     np.float32
                 ),
                 1
             )
 
         # ---------------------------------------------------------------------
-        # Extract isopleth polygons
+        # Isopleths
         # ---------------------------------------------------------------------
 
-        flat = UD.ravel()
-
-        order = np.argsort(
-            flat
-        )[::-1]
-
-        flat_sorted = flat[
-            order
-        ]
-
-        mass = np.cumsum(
-            flat_sorted
-            * cell_area
-        )
-
-        total_mass = (
-            mass[-1]
-            if mass.size
-            else 0.0
-        )
-
-        env_list: List[
-            Dict
-        ] = []
-
-        if (
-            total_mass > 0
-            and len(
-                flat_sorted
-            ) > 0
-        ):
-
-            levels = sorted(
-                set(
-                    int(x)
-                    for x in params.isopleths
-                    if 1 <= int(x) <= 100
-                )
-            )
-
-            for p in levels:
-
-                target = (
-                    p
-                    / 100.0
-                ) * total_mass
-
-                idx = int(
-                    np.searchsorted(
-                        mass,
-                        target,
-                        side="left"
-                    )
-                )
-
-                thr = float(
-                    flat_sorted[
-                        min(
-                            idx,
-                            len(
-                                flat_sorted
-                            ) - 1
-                        )
-                    ]
-                )
-
-                mask = (
-                    UD >= thr
-                ).astype(
-                    np.uint8
-                )
-
-                polygons: List[
-                    Polygon
-                ] = []
-
-                for (
-                    geom,
-                    val
-                ) in rio_shapes(
-                    mask,
-                    mask=mask.astype(
-                        bool
-                    ),
-                    transform=transform
-                ):
-
-                    if val == 1:
-
-                        poly = shp_shape(
-                            geom
-                        )
-
-                        if (
-                            not poly.is_empty
-                            and poly.area > 0
-                        ):
-
-                            polygons.append(
-                                poly
-                            )
-
-                if not polygons:
-                    continue
-
-                mp = unary_union(
-                    polygons
-                )
-
-                if isinstance(
-                    mp,
-                    (
-                        Polygon,
-                        MultiPolygon
-                    )
-                ):
-
-                    area_sq_km = float(
-                        mp.area
-                        / 1e6
-                    )
-
-                    mp_wgs = reproj_geom(
-                        mp
-                    )
-
-                    env_list.append(
-                        {
-                            "percent": int(p),
-
-                            "area_sq_km": area_sq_km,
-
-                            "geometry": shp_mapping(
-                                mp_wgs
-                            ),
-
-                            "analysis_crs": (
-                                projected_crs.to_string()
-                            ),
-                        }
-                    )
-
-        # ---------------------------------------------------------------------
-        # Debug after normalization
-        # ---------------------------------------------------------------------
-
-        nz_post = int(
-            np.count_nonzero(
-                UD
+        env_list = (
+            _extract_isopleths(
+                ud=ud,
+                transform=transform,
+                cell_area_m2=(
+                    raster_res
+                    ** 2
+                ),
+                levels=params.isopleths,
+                reproj_geom=reproj_geom,
             )
         )
 
-        print(
-            f"[dBBMM] animal={animal} "
-            f"post-norm UD stats: "
-            f"sum={UD.sum() * cell_area:.6e}, "
-            f"max={UD.max():.6e}, "
-            f"nonzero={nz_post}/{UD.size}, "
-            f"tif={tif_path}, "
-            f"crs={projected_crs.to_string()}"
-        )
+        # Attach useful reproducibility metadata.
+        for item in env_list:
 
-        # ---------------------------------------------------------------------
-        # Save result
-        # ---------------------------------------------------------------------
+            item[
+                "analysis_crs"
+            ] = (
+                projected_crs.to_string()
+            )
+
+            item[
+                "window_size"
+            ] = window_size
+
+            item[
+                "margin"
+            ] = margin
+
+            item[
+                "raster_resolution_m"
+            ] = raster_res
+
+            item[
+                "ext"
+            ] = ext
+
+            item[
+                "time_step_min"
+            ] = time_step_min
+
+            item[
+                "breaks"
+            ] = variance[
+                "breaks"
+            ]
 
         results[
-            str(animal)
+            str(
+                animal
+            )
         ] = DBBMMResult(
             geotiff=tif_path,
-            isopleths=env_list
+            isopleths=env_list,
         )
 
     return results
