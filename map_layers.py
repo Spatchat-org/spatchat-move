@@ -51,8 +51,7 @@ def _add_polygon_geom(
         kwargs = {
             "locations": [
                 (lat, lon)
-                for lon, lat
-                in poly.exterior.coords
+                for lon, lat in poly.exterior.coords
             ],
             "color": color,
             "fill": fill,
@@ -63,135 +62,102 @@ def _add_polygon_geom(
         }
 
         if dash_array:
-            kwargs[
-                "dash_array"
-            ] = dash_array
+            kwargs["dash_array"] = dash_array
 
         layer.add_child(
-            folium.Polygon(
-                **kwargs
-            )
+            folium.Polygon(**kwargs)
         )
 
-    if isinstance(
-        geom,
-        MultiPolygon
-    ):
+    if isinstance(geom, MultiPolygon):
 
         for poly in geom.geoms:
-            add_one(
-                poly
-            )
+            add_one(poly)
 
-    elif isinstance(
-        geom,
-        Polygon
-    ):
+    elif isinstance(geom, Polygon):
 
-        add_one(
-            geom
-        )
+        add_one(geom)
 
 
 # =============================================================================
-# Raster helper
+# Raster helpers
 # =============================================================================
 
-def _raster_for_webmap(
-    tif_path
-):
+def _raster_for_webmap(tif_path):
     """
-    Read a scientific raster and return an in-memory EPSG:4326 copy
-    suitable for Folium/Leaflet display.
+    Read a scientific raster and create an in-memory EPSG:4326
+    version for Leaflet/Folium display.
 
-    The original GeoTIFF is not modified.
+    The original GeoTIFF is not changed.
 
     Returns
     -------
     arr
-        Raster array in WGS84 geographic coordinates.
+        Raster array in WGS84.
 
     bounds_ll
-        Leaflet-compatible bounds:
+        Leaflet bounds:
         [[south, west], [north, east]]
     """
 
-    with rasterio.open(
-        tif_path
-    ) as src:
+    with rasterio.open(tif_path) as src:
 
         arr = (
-            src.read(
-                1
-            )
-            .astype(
-                np.float32
-            )
+            src.read(1)
+            .astype(np.float32)
         )
 
         if src.crs is None:
-
             raise ValueError(
                 f"Raster has no CRS: {tif_path}"
             )
 
-        dst_crs = (
-            "EPSG:4326"
-        )
+        dst_crs = "EPSG:4326"
 
         # ---------------------------------------------------------------------
-        # Raster is already WGS84
+        # Already WGS84
         # ---------------------------------------------------------------------
 
-        if (
-            src.crs.to_string().upper()
-            ==
-            dst_crs
-        ):
+        if src.crs.to_string().upper() == dst_crs:
 
-            bounds = (
-                src.bounds
-            )
-
-            bounds_ll = [
-                [
-                    bounds.bottom,
-                    bounds.left
-                ],
-                [
-                    bounds.top,
-                    bounds.right
-                ],
-            ]
+            bounds = src.bounds
 
             return (
                 arr,
-                bounds_ll
+                [
+                    [
+                        bounds.bottom,
+                        bounds.left,
+                    ],
+                    [
+                        bounds.top,
+                        bounds.right,
+                    ],
+                ],
             )
 
         # ---------------------------------------------------------------------
-        # Reproject a display copy to WGS84
+        # Reproject a temporary display copy
         # ---------------------------------------------------------------------
 
         (
             dst_transform,
             dst_width,
-            dst_height
+            dst_height,
         ) = calculate_default_transform(
             src.crs,
             dst_crs,
             src.width,
             src.height,
-            *src.bounds
+            *src.bounds,
         )
 
         dst_arr = np.full(
             (
                 dst_height,
-                dst_width
+                dst_width,
             ),
             np.nan,
-            dtype=np.float32
+            dtype=np.float32,
         )
 
         reproject(
@@ -210,27 +176,27 @@ def _raster_for_webmap(
             west,
             south,
             east,
-            north
+            north,
         ) = array_bounds(
             dst_height,
             dst_width,
-            dst_transform
+            dst_transform,
         )
 
         bounds_ll = [
             [
                 south,
-                west
+                west,
             ],
             [
                 north,
-                east
+                east,
             ],
         ]
 
         return (
             dst_arr,
-            bounds_ll
+            bounds_ll,
         )
 
 
@@ -241,36 +207,27 @@ def _raster_to_rgba(
     alpha_max=190.0,
 ):
     """
-    Convert a raster array to a plasma-colored RGBA image.
+    Convert raster values to a plasma RGBA image.
 
-    Positive finite raster values are displayed.
+    Positive finite values are displayed.
     Zero, negative, NaN, and infinite values are transparent.
     """
 
     arr = np.asarray(
         arr,
-        dtype=np.float32
+        dtype=np.float32,
     )
 
     valid = (
-        np.isfinite(
-            arr
-        )
-        &
-        (
-            arr > 0
-        )
+        np.isfinite(arr)
+        & (arr > 0)
     )
 
-    if np.any(
-        valid
-    ):
+    if np.any(valid):
 
         max_value = float(
             np.nanmax(
-                arr[
-                    valid
-                ]
+                arr[valid]
             )
         )
 
@@ -279,9 +236,7 @@ def _raster_to_rgba(
         max_value = 0.0
 
     if (
-        np.isfinite(
-            max_value
-        )
+        np.isfinite(max_value)
         and max_value > 0
     ):
 
@@ -294,13 +249,13 @@ def _raster_to_rgba(
 
         arr_norm = np.zeros_like(
             arr,
-            dtype=np.float32
+            dtype=np.float32,
         )
 
     arr_norm = np.clip(
         arr_norm,
         0.0,
-        1.0
+        1.0,
     )
 
     cmap = plt.get_cmap(
@@ -308,9 +263,7 @@ def _raster_to_rgba(
     )
 
     rgba = (
-        cmap(
-            arr_norm
-        )
+        cmap(arr_norm)
         * 255
     ).astype(
         np.uint8
@@ -320,36 +273,22 @@ def _raster_to_rgba(
         valid,
         np.power(
             arr_norm,
-            alpha_power
+            alpha_power,
         )
         * alpha_max,
-        0.0
+        0.0,
     ).astype(
         np.uint8
     )
 
-    img = np.dstack(
+    return np.dstack(
         [
-            rgba[
-                :,
-                :,
-                0
-            ],
-            rgba[
-                :,
-                :,
-                1
-            ],
-            rgba[
-                :,
-                :,
-                2
-            ],
+            rgba[:, :, 0],
+            rgba[:, :, 1],
+            rgba[:, :, 2],
             alpha,
         ]
     )
-
-    return img
 
 
 # =============================================================================
@@ -360,41 +299,91 @@ def _base_map(
     center_lat,
     center_lon,
     control_scale=True,
-    zoom=9
+    zoom=9,
 ):
+    """
+    Create the Leaflet base map.
+
+    A blank background is included as one of the mutually exclusive
+    base-map choices.
+    """
 
     m = folium.Map(
         location=[
             center_lat,
-            center_lon
+            center_lon,
         ],
         zoom_start=zoom,
-        control_scale=control_scale
+        control_scale=control_scale,
+        tiles=None,
+    )
+
+    # -------------------------------------------------------------------------
+    # Blank base layer
+    #
+    # A transparent 1x1 PNG is used for all tiles. The map container
+    # background is forced to white by the CSS patch below.
+    # -------------------------------------------------------------------------
+
+    blank_tile = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        "AAAADUlEQVQIHWP4z8DwHwAFgAI/ScL6WQAAAABJRU5ErkJggg=="
     )
 
     folium.TileLayer(
-        "OpenStreetMap"
-    ).add_to(
-        m
-    )
+        tiles=blank_tile,
+        name="Blank",
+        attr="Blank background",
+        overlay=False,
+        control=True,
+        show=False,
+    ).add_to(m)
+
+    # -------------------------------------------------------------------------
+    # OpenStreetMap
+    # -------------------------------------------------------------------------
+
+    folium.TileLayer(
+        "OpenStreetMap",
+        name="OpenStreetMap",
+        overlay=False,
+        control=True,
+        show=True,
+    ).add_to(m)
+
+    # -------------------------------------------------------------------------
+    # CartoDB Positron
+    # -------------------------------------------------------------------------
 
     folium.TileLayer(
         "CartoDB positron",
-        attr="CartoDB"
-    ).add_to(
-        m
-    )
+        name="CartoDB Positron",
+        attr="CartoDB",
+        overlay=False,
+        control=True,
+        show=False,
+    ).add_to(m)
+
+    # -------------------------------------------------------------------------
+    # Topographic
+    # -------------------------------------------------------------------------
 
     folium.TileLayer(
         tiles=(
             "https://{s}.tile.opentopomap.org/"
-            "{z}/{y}/{x}.png"
+            "{z}/{x}/{y}.png"
         ),
         attr="OpenTopoMap",
-        name="Topographic"
-    ).add_to(
-        m
-    )
+        name="Topographic",
+        overlay=False,
+        control=True,
+        show=False,
+    ).add_to(m)
+
+    # -------------------------------------------------------------------------
+    # Satellite
+    # -------------------------------------------------------------------------
 
     folium.TileLayer(
         tiles=(
@@ -404,38 +393,34 @@ def _base_map(
             "{z}/{y}/{x}"
         ),
         attr="Esri",
-        name="Satellite"
-    ).add_to(
-        m
-    )
+        name="Satellite",
+        overlay=False,
+        control=True,
+        show=False,
+    ).add_to(m)
 
     return m
 
 
 # =============================================================================
-# Layer-control styling
+# Layer-control appearance
 # =============================================================================
 
-def _add_layer_control_style_patch(
-    m
-):
+def _add_layer_control_style_patch(m):
 
-    root = (
-        m.get_root()
-    )
+    root = m.get_root()
 
     if getattr(
         root,
         "_spatchat_layer_control_style_patch_added",
-        False
+        False,
     ):
-
         return
 
     setattr(
         root,
         "_spatchat_layer_control_style_patch_added",
-        True
+        True,
     )
 
     patch = MacroElement()
@@ -443,112 +428,782 @@ def _add_layer_control_style_patch(
     patch._template = Template(
         """
         {% macro html(this, kwargs) %}
+
         <style>
 
-          .leaflet-control-layers {
-            background: rgba(30, 30, 30, 0.9) !important;
+        /* White canvas used by the Blank base map */
+        .leaflet-container {
+            background: #ffffff !important;
+        }
+
+        .leaflet-control-layers {
+            background: rgba(30, 30, 30, 0.92) !important;
             color: #f5f5f5 !important;
             border-radius: 8px !important;
             border: none !important;
             box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35) !important;
-          }
 
-          .leaflet-control-layers-toggle {
-            background-color: rgba(30, 30, 30, 0.9) !important;
+            /*
+             * Prevent very long layer lists from taking over the map.
+             */
+            max-height: 78vh;
+            overflow-y: auto;
+            min-width: 220px;
+        }
+
+        .leaflet-control-layers-toggle {
+            background-color: rgba(30, 30, 30, 0.92) !important;
             border-radius: 8px !important;
             filter: invert(1) brightness(1.25);
-          }
+        }
 
-          .leaflet-control-layers-expanded {
+        .leaflet-control-layers-expanded {
             padding: 0 !important;
-            background: rgba(30, 30, 30, 0.9) !important;
-          }
+            background: rgba(30, 30, 30, 0.92) !important;
+        }
 
-          .leaflet-control-layers-list,
-          .leaflet-control-layers form,
-          .leaflet-control-layers .leaflet-control-layers-base,
-          .leaflet-control-layers .leaflet-control-layers-overlays,
-          .leaflet-control-layers .leaflet-control-layers-separator {
-            background: rgba(30, 30, 30, 0.9) !important;
+        .leaflet-control-layers-list,
+        .leaflet-control-layers form,
+        .leaflet-control-layers .leaflet-control-layers-base,
+        .leaflet-control-layers .leaflet-control-layers-overlays,
+        .leaflet-control-layers .leaflet-control-layers-separator {
+            background: rgba(30, 30, 30, 0.92) !important;
             color: inherit !important;
             border-color: rgba(255, 255, 255, 0.08) !important;
-          }
+        }
 
-          .leaflet-control-layers label {
+        .leaflet-control-layers label {
             display: flex;
             align-items: center;
             gap: 8px;
-            padding: 7px 10px;
+            padding: 6px 10px;
             margin: 0;
             color: #f5f5f5 !important;
             font-size: 12px;
             line-height: 1.3;
-          }
+        }
 
-          .leaflet-control-layers label:hover {
+        .leaflet-control-layers label:hover {
             background: rgba(255, 255, 255, 0.05);
-          }
+        }
 
-          .leaflet-control-layers input[type="checkbox"],
-          .leaflet-control-layers input[type="radio"] {
+        .leaflet-control-layers input[type="checkbox"],
+        .leaflet-control-layers input[type="radio"] {
             accent-color: #8ec5ff;
-          }
+        }
 
-          .leaflet-control-layers .leaflet-control-layers-separator {
+        .leaflet-control-layers .leaflet-control-layers-separator {
             margin: 0;
-          }
+        }
 
-          .leaflet-control-layers,
-          .leaflet-control-layers .leaflet-control-layers-list {
+        .leaflet-control-layers,
+        .leaflet-control-layers .leaflet-control-layers-list {
             scrollbar-color:
-              rgba(255, 255, 255, 0.18)
-              rgba(255, 255, 255, 0.06);
+                rgba(255, 255, 255, 0.22)
+                rgba(255, 255, 255, 0.06);
             scrollbar-width: thin;
-          }
+        }
 
-          .leaflet-control-layers::-webkit-scrollbar,
-          .leaflet-control-layers
-          .leaflet-control-layers-list::-webkit-scrollbar {
-            width: 10px;
-            height: 10px;
-          }
+        .leaflet-control-layers::-webkit-scrollbar,
+        .leaflet-control-layers-list::-webkit-scrollbar {
+            width: 9px;
+        }
 
-          .leaflet-control-layers::-webkit-scrollbar-track,
-          .leaflet-control-layers
-          .leaflet-control-layers-list::-webkit-scrollbar-track {
+        .leaflet-control-layers::-webkit-scrollbar-track,
+        .leaflet-control-layers-list::-webkit-scrollbar-track {
             background: rgba(255, 255, 255, 0.06);
-          }
+        }
 
-          .leaflet-control-layers::-webkit-scrollbar-thumb,
-          .leaflet-control-layers
-          .leaflet-control-layers-list::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.18);
+        .leaflet-control-layers::-webkit-scrollbar-thumb,
+        .leaflet-control-layers-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.20);
             border-radius: 999px;
-          }
-
-          .leaflet-control-layers::-webkit-scrollbar-thumb:hover,
-          .leaflet-control-layers
-          .leaflet-control-layers-list::-webkit-scrollbar-thumb:hover {
-            background: rgba(255, 255, 255, 0.26);
-          }
+        }
 
         </style>
+
         {% endmacro %}
         """
     )
 
-    root.add_child(
-        patch
+    root.add_child(patch)
+
+
+# =============================================================================
+# Group layers by animal
+# =============================================================================
+
+def _add_grouped_layer_control_patch(
+    m,
+    animal_ids,
+):
+    """
+    Convert the flat Leaflet overlay list into collapsible groups
+    for each animal.
+
+    Layer names are expected to begin with the animal ID, e.g.:
+
+        147 MCP 95%
+        147 KDE Raster
+        147 KDE 50% Contour
+        147 LoCoH 95%
+
+    Points and Tracks remain outside the animal groups.
+
+    Also adds explicit:
+        All layers on
+        All layers off
+    buttons.
+    """
+
+    root = m.get_root()
+
+    if getattr(
+        root,
+        "_spatchat_grouped_layer_patch_added",
+        False,
+    ):
+        return
+
+    setattr(
+        root,
+        "_spatchat_grouped_layer_patch_added",
+        True,
     )
+
+    patch = MacroElement()
+
+    patch.animal_ids = [
+        str(x)
+        for x in animal_ids
+    ]
+
+    patch._template = Template(
+        """
+        {% macro html(this, kwargs) %}
+
+        <style>
+
+        /* ========================================================
+           Global layer buttons
+        ======================================================== */
+
+        .spatchat-layer-buttons {
+            display: flex;
+            gap: 5px;
+            padding: 8px;
+            flex-wrap: wrap;
+            border-bottom:
+                1px solid rgba(255,255,255,0.10);
+        }
+
+        .spatchat-layer-button {
+            border: 0;
+            border-radius: 5px;
+            padding: 5px 8px;
+            cursor: pointer;
+            font-size: 11px;
+            line-height: 1.2;
+            color: #ffffff;
+            background: rgba(255,255,255,0.14);
+        }
+
+        .spatchat-layer-button:hover {
+            background: rgba(255,255,255,0.25);
+        }
+
+
+        /* ========================================================
+           Animal sections
+        ======================================================== */
+
+        .spatchat-animal-group {
+            margin: 0;
+            border-top:
+                1px solid rgba(255,255,255,0.08);
+        }
+
+        .spatchat-animal-header {
+            cursor: pointer;
+            user-select: none;
+            padding: 7px 9px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 600;
+            color: #f5f5f5;
+        }
+
+        .spatchat-animal-header:hover {
+            background: rgba(255,255,255,0.07);
+        }
+
+        .spatchat-animal-arrow {
+            display: inline-block;
+            width: 12px;
+            font-size: 10px;
+        }
+
+        .spatchat-animal-group:not(.open)
+        .spatchat-animal-arrow::before {
+            content: "▶";
+        }
+
+        .spatchat-animal-group.open
+        .spatchat-animal-arrow::before {
+            content: "▼";
+        }
+
+        .spatchat-animal-body {
+            display: none;
+            padding-left: 8px;
+            padding-bottom: 4px;
+        }
+
+        .spatchat-animal-group.open
+        .spatchat-animal-body {
+            display: block;
+        }
+
+
+        /* ========================================================
+           Optional buttons within each individual
+        ======================================================== */
+
+        .spatchat-animal-actions {
+            display: flex;
+            gap: 4px;
+            padding: 3px 8px 5px 8px;
+        }
+
+        .spatchat-animal-action {
+            border: 0;
+            border-radius: 4px;
+            padding: 3px 6px;
+            cursor: pointer;
+            font-size: 10px;
+            color: #eeeeee;
+            background: rgba(255,255,255,0.10);
+        }
+
+        .spatchat-animal-action:hover {
+            background: rgba(255,255,255,0.20);
+        }
+
+        </style>
+
+
+        <script>
+
+        (function() {
+
+            const animalIds =
+                {{ this.animal_ids | tojson }};
+
+
+            function stripAnimalPrefix(
+                element,
+                prefix
+            ) {
+
+                /*
+                 * Leaflet/Folium can place the text inside nested spans.
+                 * Walk all text nodes and remove the first matching prefix.
+                 */
+
+                const walker =
+                    document.createTreeWalker(
+                        element,
+                        NodeFilter.SHOW_TEXT
+                    );
+
+                let node;
+
+                while (
+                    node = walker.nextNode()
+                ) {
+
+                    const value =
+                        node.nodeValue || "";
+
+                    const trimmed =
+                        value.trimStart();
+
+                    if (
+                        trimmed.startsWith(
+                            prefix
+                        )
+                    ) {
+
+                        node.nodeValue =
+                            value.replace(
+                                prefix,
+                                ""
+                            );
+
+                        return;
+                    }
+                }
+            }
+
+
+            function setCheckboxes(
+                container,
+                checked
+            ) {
+
+                const inputs =
+                    container.querySelectorAll(
+                        'input[type="checkbox"]'
+                    );
+
+                inputs.forEach(
+                    function(input) {
+
+                        if (
+                            input.checked
+                            !== checked
+                        ) {
+
+                            /*
+                             * click(), rather than merely changing checked,
+                             * lets Leaflet actually add/remove the layer.
+                             */
+
+                            input.click();
+                        }
+                    }
+                );
+            }
+
+
+            function setupLayerGroups() {
+
+                const control =
+                    document.querySelector(
+                        '.leaflet-control-layers'
+                    );
+
+                if (!control) {
+
+                    setTimeout(
+                        setupLayerGroups,
+                        100
+                    );
+
+                    return;
+                }
+
+
+                const overlays =
+                    control.querySelector(
+                        '.leaflet-control-layers-overlays'
+                    );
+
+                if (!overlays) {
+
+                    setTimeout(
+                        setupLayerGroups,
+                        100
+                    );
+
+                    return;
+                }
+
+
+                if (
+                    overlays.dataset.spatchatGrouped
+                    === "1"
+                ) {
+                    return;
+                }
+
+
+                overlays.dataset.spatchatGrouped =
+                    "1";
+
+
+                /* ====================================================
+                   Save the original direct labels first
+                ==================================================== */
+
+                const labels =
+                    Array.from(
+                        overlays.children
+                    ).filter(
+                        element =>
+                            element.tagName
+                            === "LABEL"
+                    );
+
+
+                /* ====================================================
+                   Global All On / All Off controls
+                ==================================================== */
+
+                const buttons =
+                    document.createElement(
+                        "div"
+                    );
+
+                buttons.className =
+                    "spatchat-layer-buttons";
+
+
+                const allOn =
+                    document.createElement(
+                        "button"
+                    );
+
+                allOn.type =
+                    "button";
+
+                allOn.className =
+                    "spatchat-layer-button";
+
+                allOn.textContent =
+                    "All layers on";
+
+
+                const allOff =
+                    document.createElement(
+                        "button"
+                    );
+
+                allOff.type =
+                    "button";
+
+                allOff.className =
+                    "spatchat-layer-button";
+
+                allOff.textContent =
+                    "All layers off";
+
+
+                allOn.addEventListener(
+                    "click",
+                    function(event) {
+
+                        event.preventDefault();
+                        event.stopPropagation();
+
+                        setCheckboxes(
+                            overlays,
+                            true
+                        );
+                    }
+                );
+
+
+                allOff.addEventListener(
+                    "click",
+                    function(event) {
+
+                        event.preventDefault();
+                        event.stopPropagation();
+
+                        setCheckboxes(
+                            overlays,
+                            false
+                        );
+                    }
+                );
+
+
+                buttons.appendChild(
+                    allOn
+                );
+
+                buttons.appendChild(
+                    allOff
+                );
+
+
+                overlays.insertBefore(
+                    buttons,
+                    overlays.firstChild
+                );
+
+
+                /* ====================================================
+                   Create animal groups
+                ==================================================== */
+
+                animalIds.forEach(
+                    function(animalId) {
+
+                        const prefix =
+                            animalId + " ";
+
+
+                        const matching =
+                            labels.filter(
+                                function(label) {
+
+                                    return (
+                                        label.textContent
+                                        .trim()
+                                        .startsWith(
+                                            prefix
+                                        )
+                                    );
+                                }
+                            );
+
+
+                        if (
+                            matching.length
+                            === 0
+                        ) {
+                            return;
+                        }
+
+
+                        const group =
+                            document.createElement(
+                                "div"
+                            );
+
+                        group.className =
+                            "spatchat-animal-group";
+
+
+                        const header =
+                            document.createElement(
+                                "div"
+                            );
+
+                        header.className =
+                            "spatchat-animal-header";
+
+
+                        const arrow =
+                            document.createElement(
+                                "span"
+                            );
+
+                        arrow.className =
+                            "spatchat-animal-arrow";
+
+
+                        const title =
+                            document.createElement(
+                                "span"
+                            );
+
+                        title.textContent =
+                            "Animal "
+                            + animalId;
+
+
+                        header.appendChild(
+                            arrow
+                        );
+
+                        header.appendChild(
+                            title
+                        );
+
+
+                        const body =
+                            document.createElement(
+                                "div"
+                            );
+
+                        body.className =
+                            "spatchat-animal-body";
+
+
+                        /* --------------------------------------------
+                           Per-animal On / Off buttons
+                        -------------------------------------------- */
+
+                        const actions =
+                            document.createElement(
+                                "div"
+                            );
+
+                        actions.className =
+                            "spatchat-animal-actions";
+
+
+                        const animalOn =
+                            document.createElement(
+                                "button"
+                            );
+
+                        animalOn.type =
+                            "button";
+
+                        animalOn.className =
+                            "spatchat-animal-action";
+
+                        animalOn.textContent =
+                            "All on";
+
+
+                        const animalOff =
+                            document.createElement(
+                                "button"
+                            );
+
+                        animalOff.type =
+                            "button";
+
+                        animalOff.className =
+                            "spatchat-animal-action";
+
+                        animalOff.textContent =
+                            "All off";
+
+
+                        animalOn.addEventListener(
+                            "click",
+                            function(event) {
+
+                                event.preventDefault();
+                                event.stopPropagation();
+
+                                setCheckboxes(
+                                    body,
+                                    true
+                                );
+                            }
+                        );
+
+
+                        animalOff.addEventListener(
+                            "click",
+                            function(event) {
+
+                                event.preventDefault();
+                                event.stopPropagation();
+
+                                setCheckboxes(
+                                    body,
+                                    false
+                                );
+                            }
+                        );
+
+
+                        actions.appendChild(
+                            animalOn
+                        );
+
+                        actions.appendChild(
+                            animalOff
+                        );
+
+
+                        body.appendChild(
+                            actions
+                        );
+
+
+                        /* --------------------------------------------
+                           Move layers into this animal section
+                        -------------------------------------------- */
+
+                        matching.forEach(
+                            function(label) {
+
+                                stripAnimalPrefix(
+                                    label,
+                                    prefix
+                                );
+
+                                body.appendChild(
+                                    label
+                                );
+                            }
+                        );
+
+
+                        header.addEventListener(
+                            "click",
+                            function(event) {
+
+                                event.preventDefault();
+
+                                group.classList.toggle(
+                                    "open"
+                                );
+                            }
+                        );
+
+
+                        group.appendChild(
+                            header
+                        );
+
+                        group.appendChild(
+                            body
+                        );
+
+                        overlays.appendChild(
+                            group
+                        );
+                    }
+                );
+
+
+                /* ====================================================
+                   Open first animal group by default
+                ==================================================== */
+
+                const first =
+                    overlays.querySelector(
+                        ".spatchat-animal-group"
+                    );
+
+                if (first) {
+                    first.classList.add(
+                        "open"
+                    );
+                }
+
+            }
+
+
+            if (
+                document.readyState
+                === "loading"
+            ) {
+
+                document.addEventListener(
+                    "DOMContentLoaded",
+                    setupLayerGroups
+                );
+
+            } else {
+
+                /*
+                 * Give Leaflet a moment to construct its LayerControl.
+                 */
+
+                setTimeout(
+                    setupLayerGroups,
+                    50
+                );
+            }
+
+        })();
+
+        </script>
+
+        {% endmacro %}
+        """
+    )
+
+    root.add_child(patch)
 
 
 # =============================================================================
 # Preview map
 # =============================================================================
 
-def build_preview_map(
-    df
-):
+def build_preview_map(df):
 
     has_timestamp = (
         "timestamp"
@@ -556,93 +1211,67 @@ def build_preview_map(
     )
 
     m = _base_map(
-        df[
-            "latitude"
-        ].mean(),
-        df[
-            "longitude"
-        ].mean(),
+        df["latitude"].mean(),
+        df["longitude"].mean(),
         control_scale=True,
-        zoom=9
+        zoom=9,
     )
 
     points_layer = folium.FeatureGroup(
         name="Points",
-        show=True
+        show=True,
     )
 
     lines_layer = folium.FeatureGroup(
         name="Tracks",
-        show=True
+        show=True,
     )
 
     animal_ids = (
-        df[
-            "animal_id"
-        ].unique()
+        df["animal_id"].unique()
         if "animal_id" in df.columns
-        else [
-            "sample"
-        ]
+        else ["sample"]
     )
 
     color_map = {
         aid:
             f"#{random.randint(0, 0xFFFFFF):06x}"
-        for aid
-        in animal_ids
+        for aid in animal_ids
     }
 
     for animal in animal_ids:
 
         track = (
             df[
-                df[
-                    "animal_id"
-                ]
+                df["animal_id"]
                 == animal
             ]
-            if "animal_id"
-            in df.columns
+            if "animal_id" in df.columns
             else df
         )
 
         if has_timestamp:
 
-            track = (
-                track.sort_values(
-                    "timestamp"
-                )
+            track = track.sort_values(
+                "timestamp"
             )
 
             coords = list(
                 zip(
-                    track[
-                        "latitude"
-                    ],
-                    track[
-                        "longitude"
-                    ]
+                    track["latitude"],
+                    track["longitude"],
                 )
             )
 
-            if len(
-                coords
-            ) > 1:
+            if len(coords) > 1:
 
                 folium.PolyLine(
                     coords,
-                    color=color_map[
-                        animal
-                    ],
+                    color=color_map[animal],
                     weight=2.5,
                     opacity=0.8,
-                    popup=str(
-                        animal
-                    )
-                ).add_to(
-                    lines_layer
-                )
+                    popup=str(animal),
+                ).add_to(lines_layer)
 
         for _, row in track.iterrows():
 
@@ -653,9 +1282,7 @@ def build_preview_map(
                     f"<br>{row['timestamp']}"
                     if (
                         has_timestamp
-                        and row.get(
-                            "timestamp"
-                        )
+                        and row.get("timestamp")
                         is not None
                     )
                     else ""
@@ -664,56 +1291,35 @@ def build_preview_map(
 
             folium.CircleMarker(
                 location=[
-                    row[
-                        "latitude"
-                    ],
-                    row[
-                        "longitude"
-                    ]
+                    row["latitude"],
+                    row["longitude"],
                 ],
                 radius=3,
                 popup=label,
-                color=color_map[
-                    animal
-                ],
+                color=color_map[animal],
                 fill=True,
-                fill_opacity=0.7
-            ).add_to(
-                points_layer
-            )
+                fill_opacity=0.7,
+            ).add_to(points_layer)
 
-    points_layer.add_to(
-        m
-    )
+    points_layer.add_to(m)
 
     if has_timestamp:
-
-        lines_layer.add_to(
-            m
-        )
+        lines_layer.add_to(m)
 
     folium.LayerControl(
         collapsed=False
-    ).add_to(
-        m
-    )
+    ).add_to(m)
 
-    _add_layer_control_style_patch(
-        m
-    )
+    _add_layer_control_style_patch(m)
 
-    apply_map_control_patches(
-        m
-    )
+    apply_map_control_patches(m)
 
     m = fit_map_to_bounds(
         m,
-        df
+        df,
     )
 
-    return (
-        m._repr_html_()
-    )
+    return m._repr_html_()
 
 
 # =============================================================================
@@ -722,17 +1328,17 @@ def build_preview_map(
 
 def make_points_tracks_layers(
     df,
-    color_map
+    color_map,
 ):
 
     points_layer = folium.FeatureGroup(
         name="Points",
-        show=True
+        show=True,
     )
 
     tracks_layer = folium.FeatureGroup(
         name="Tracks",
-        show=True
+        show=True,
     )
 
     has_timestamp = (
@@ -741,27 +1347,19 @@ def make_points_tracks_layers(
     )
 
     animal_ids = (
-        df[
-            "animal_id"
-        ].unique()
-        if "animal_id"
-        in df.columns
-        else [
-            "sample"
-        ]
+        df["animal_id"].unique()
+        if "animal_id" in df.columns
+        else ["sample"]
     )
 
     for animal in animal_ids:
 
         track = (
             df[
-                df[
-                    "animal_id"
-                ]
+                df["animal_id"]
                 == animal
             ]
-            if "animal_id"
-            in df.columns
+            if "animal_id" in df.columns
             else df
         )
 
@@ -777,54 +1375,38 @@ def make_points_tracks_layers(
 
             coords = list(
                 zip(
-                    track[
-                        "latitude"
-                    ],
-                    track[
-                        "longitude"
-                    ]
+                    track["latitude"],
+                    track["longitude"],
                 )
             )
 
-            if len(
-                coords
-            ) > 1:
+            if len(coords) > 1:
 
                 folium.PolyLine(
                     coords,
                     color=color,
                     weight=2.5,
                     opacity=0.8,
-                    popup=(
-                        f"{animal} Track"
-                    )
-                ).add_to(
-                    tracks_layer
-                )
+                    popup=f"{animal} Track",
+                ).add_to(tracks_layer)
 
         for _, row in track.iterrows():
 
             folium.CircleMarker(
                 location=[
-                    row[
-                        "latitude"
-                    ],
-                    row[
-                        "longitude"
-                    ]
+                    row["latitude"],
+                    row["longitude"],
                 ],
                 radius=3,
                 color=color,
                 fill=True,
                 fill_opacity=0.7,
-                popup=f"{animal}"
-            ).add_to(
-                points_layer
-            )
+                popup=f"{animal}",
+            ).add_to(points_layer)
 
     return (
         points_layer,
-        tracks_layer
+        tracks_layer,
     )
 
 
@@ -836,7 +1418,7 @@ def make_mcp_layers(
     mcp_results,
     requested_percents,
     animal_ids,
-    color_map
+    color_map,
 ):
 
     layers = []
@@ -848,9 +1430,7 @@ def make_mcp_layers(
             if (
                 animal in mcp_results
                 and percent
-                in mcp_results[
-                    animal
-                ]
+                in mcp_results[animal]
             ):
 
                 v = (
@@ -866,41 +1446,30 @@ def make_mcp_layers(
                         f"{animal} "
                         f"MCP {percent}%"
                     ),
-                    show=True
+                    show=True,
                 )
 
-                layer.add_child(
-                    folium.Polygon(
-                        locations=[
-                            (
-                                lat,
-                                lon
-                            )
-                            for lon, lat
-                            in np.array(
-                                v[
-                                    "polygon"
-                                ].exterior.coords
-                            )
-                        ],
-                        color=color_map[
-                            animal
-                        ],
-                        fill=True,
-                        fill_opacity=(
-                            0.15
-                            +
-                            0.15
-                            * (
-                                percent
-                                / 100
-                            )
-                        ),
-                        popup=(
-                            f"{animal} "
-                            f"MCP {percent}%"
+                polygon = v[
+                    "polygon"
+                ]
+
+                _add_polygon_geom(
+                    layer,
+                    polygon,
+                    color=color_map[animal],
+                    fill=True,
+                    fill_opacity=(
+                        0.15
+                        +
+                        0.15
+                        * (
+                            percent / 100
                         )
-                    )
+                    ),
+                    popup=(
+                        f"{animal} "
+                        f"MCP {percent}%"
+                    ),
                 )
 
                 layers.append(
@@ -918,7 +1487,7 @@ def make_kde_layers(
     kde_results,
     requested_kde_percents,
     animal_ids,
-    color_map
+    color_map,
 ):
 
     layers = []
@@ -933,9 +1502,7 @@ def make_kde_layers(
                 animal
                 in kde_results
                 and p
-                in kde_results[
-                    animal
-                ]
+                in kde_results[animal]
             )
         ]
 
@@ -976,7 +1543,7 @@ def make_kde_layers(
                             f"{animal} "
                             "KDE Raster"
                         ),
-                        show=True
+                        show=True,
                     )
                 )
 
@@ -984,7 +1551,7 @@ def make_kde_layers(
 
                     (
                         arr,
-                        bounds_ll
+                        bounds_ll,
                     ) = _raster_for_webmap(
                         tif_path
                     )
@@ -1000,7 +1567,7 @@ def make_kde_layers(
                             image=img,
                             bounds=bounds_ll,
                             opacity=1.0,
-                            interactive=False
+                            interactive=False,
                         )
                     )
 
@@ -1011,8 +1578,9 @@ def make_kde_layers(
                 except Exception as exc:
 
                     print(
-                        f"[map] KDE raster display error "
-                        f"for animal={animal}: {exc}"
+                        "[map] KDE raster display "
+                        f"error for animal={animal}: "
+                        f"{exc}"
                     )
 
         # ---------------------------------------------------------------------
@@ -1029,14 +1597,12 @@ def make_kde_layers(
                 ]
             )
 
-            contour_layer = (
-                folium.FeatureGroup(
-                    name=(
-                        f"{animal} KDE "
-                        f"{percent}% Contour"
-                    ),
-                    show=True
-                )
+            contour_layer = folium.FeatureGroup(
+                name=(
+                    f"{animal} KDE "
+                    f"{percent}% Contour"
+                ),
+                show=True,
             )
 
             contour = (
@@ -1050,15 +1616,13 @@ def make_kde_layers(
                 _add_polygon_geom(
                     contour_layer,
                     contour,
-                    color=color_map[
-                        animal
-                    ],
+                    color=color_map[animal],
                     fill=True,
                     fill_opacity=0.2,
                     popup=(
                         f"{animal} KDE "
                         f"{percent}% Contour"
-                    )
+                    ),
                 )
 
             layers.append(
@@ -1076,7 +1640,7 @@ def make_akde_layers(
     akde_results,
     requested_akde_percents,
     animal_ids,
-    color_map
+    color_map,
 ):
 
     layers = []
@@ -1091,9 +1655,7 @@ def make_akde_layers(
                 animal
                 in akde_results
                 and p
-                in akde_results[
-                    animal
-                ]
+                in akde_results[animal]
             )
         ]
 
@@ -1128,21 +1690,19 @@ def make_akde_layers(
                 )
             ):
 
-                raster_layer = (
-                    folium.FeatureGroup(
-                        name=(
-                            f"{animal} "
-                            "AKDE Raster"
-                        ),
-                        show=True
-                    )
+                raster_layer = folium.FeatureGroup(
+                    name=(
+                        f"{animal} "
+                        "AKDE Raster"
+                    ),
+                    show=True,
                 )
 
                 try:
 
                     (
                         arr,
-                        bounds_ll
+                        bounds_ll,
                     ) = _raster_for_webmap(
                         tif_path
                     )
@@ -1158,7 +1718,7 @@ def make_akde_layers(
                             image=img,
                             bounds=bounds_ll,
                             opacity=1.0,
-                            interactive=False
+                            interactive=False,
                         )
                     )
 
@@ -1169,8 +1729,9 @@ def make_akde_layers(
                 except Exception as exc:
 
                     print(
-                        f"[map] AKDE raster display error "
-                        f"for animal={animal}: {exc}"
+                        "[map] AKDE raster display "
+                        f"error for animal={animal}: "
+                        f"{exc}"
                     )
 
         # ---------------------------------------------------------------------
@@ -1187,14 +1748,12 @@ def make_akde_layers(
                 ]
             )
 
-            contour_layer = (
-                folium.FeatureGroup(
-                    name=(
-                        f"{animal} AKDE "
-                        f"{percent}% Contour"
-                    ),
-                    show=True
-                )
+            contour_layer = folium.FeatureGroup(
+                name=(
+                    f"{animal} AKDE "
+                    f"{percent}% Contour"
+                ),
+                show=True,
             )
 
             contour = (
@@ -1206,7 +1765,7 @@ def make_akde_layers(
             area = float(
                 v.get(
                     "area",
-                    0.0
+                    0.0,
                 )
             )
 
@@ -1221,12 +1780,10 @@ def make_akde_layers(
                     ci,
                     (
                         list,
-                        tuple
+                        tuple,
                     )
                 )
-                and len(
-                    ci
-                )
+                and len(ci)
                 == 2
             ):
 
@@ -1254,12 +1811,10 @@ def make_akde_layers(
                 _add_polygon_geom(
                     contour_layer,
                     contour,
-                    color=color_map[
-                        animal
-                    ],
+                    color=color_map[animal],
                     fill=True,
                     fill_opacity=0.2,
-                    popup=popup
+                    popup=popup,
                 )
 
             layers.append(
@@ -1267,7 +1822,7 @@ def make_akde_layers(
             )
 
             # -----------------------------------------------------------------
-            # AKDE CI contours
+            # Confidence interval contours
             # -----------------------------------------------------------------
 
             ci_contours = (
@@ -1279,15 +1834,13 @@ def make_akde_layers(
 
             if ci_contours:
 
-                ci_layer = (
-                    folium.FeatureGroup(
-                        name=(
-                            f"{animal} AKDE "
-                            f"{percent}% "
-                            "95% CI Contours"
-                        ),
-                        show=True
-                    )
+                ci_layer = folium.FeatureGroup(
+                    name=(
+                        f"{animal} AKDE "
+                        f"{percent}% "
+                        "95% CI Contours"
+                    ),
+                    show=True,
                 )
 
                 ci_values = {
@@ -1304,7 +1857,7 @@ def make_akde_layers(
 
                 for (
                     label,
-                    ci_contour
+                    ci_contour,
                 ) in ci_contours.items():
 
                     ci_area = (
@@ -1323,37 +1876,31 @@ def make_akde_layers(
                         f"{animal} AKDE "
                         f"{percent}% 95% CI "
                         f"{label} contour"
-                        f"<br>Area: "
-                        f"{area_text}"
+                        f"<br>Area: {area_text}"
                     )
 
                     _add_polygon_geom(
                         ci_layer,
                         ci_contour,
-                        color=color_map[
-                            animal
-                        ],
+                        color=color_map[animal],
                         fill=False,
                         fill_opacity=0.0,
                         weight=(
                             2
-                            if label
-                            == "low"
+                            if label == "low"
                             else 3
                         ),
                         opacity=(
                             0.9
-                            if label
-                            == "low"
+                            if label == "low"
                             else 0.75
                         ),
                         dash_array=(
                             "5,5"
-                            if label
-                            == "low"
+                            if label == "low"
                             else "10,6"
                         ),
-                        popup=ci_popup
+                        popup=ci_popup,
                     )
 
                 layers.append(
@@ -1371,7 +1918,7 @@ def make_locoh_layers(
     locoh_result: dict,
     animal_ids,
     color_map,
-    name_prefix: str = "LoCoH"
+    name_prefix: str = "LoCoH",
 ):
 
     layers = []
@@ -1379,7 +1926,7 @@ def make_locoh_layers(
     animals_dict = (
         locoh_result.get(
             "animals",
-            {}
+            {},
         )
         if locoh_result
         else {}
@@ -1389,9 +1936,7 @@ def make_locoh_layers(
 
         data = (
             animals_dict.get(
-                str(
-                    animal
-                )
+                str(animal)
             )
             or animals_dict.get(
                 animal
@@ -1403,7 +1948,7 @@ def make_locoh_layers(
 
         for item in data.get(
             "isopleths",
-            []
+            [],
         ):
 
             iso = int(
@@ -1421,7 +1966,7 @@ def make_locoh_layers(
             area_km2 = float(
                 item.get(
                     "area_sq_km",
-                    0.0
+                    0.0,
                 )
             )
 
@@ -1431,9 +1976,7 @@ def make_locoh_layers(
 
                 "properties": {
                     "animal_id":
-                        str(
-                            animal
-                        ),
+                        str(animal),
 
                     "isopleth":
                         iso,
@@ -1441,7 +1984,7 @@ def make_locoh_layers(
                     "area_km2":
                         round(
                             area_km2,
-                            3
+                            3,
                         ),
                 },
 
@@ -1449,15 +1992,13 @@ def make_locoh_layers(
                     gj_geom,
             }
 
-            layer = (
-                folium.FeatureGroup(
-                    name=(
-                        f"{animal} "
-                        f"{name_prefix} "
-                        f"{iso}%"
-                    ),
-                    show=True
-                )
+            layer = folium.FeatureGroup(
+                name=(
+                    f"{animal} "
+                    f"{name_prefix} "
+                    f"{iso}%"
+                ),
+                show=True,
             )
 
             folium.GeoJson(
@@ -1475,8 +2016,7 @@ def make_locoh_layers(
                         "fillOpacity":
                             (
                                 0.45
-                                if iso
-                                != 95
+                                if iso != 95
                                 else 0.25
                             ),
 
@@ -1493,18 +2033,16 @@ def make_locoh_layers(
                     fields=[
                         "animal_id",
                         "isopleth",
-                        "area_km2"
+                        "area_km2",
                     ],
                     aliases=[
                         "Animal",
                         "Isopleth (%)",
-                        "Area (km²)"
+                        "Area (km²)",
                     ],
                     localize=True,
                 ),
-            ).add_to(
-                layer
-            )
+            ).add_to(layer)
 
             layers.append(
                 layer
@@ -1521,7 +2059,7 @@ def make_locoh_facets_layers(
     locoh_result: dict,
     animal_ids,
     color_map,
-    name_prefix: str = "LoCoH facets"
+    name_prefix: str = "LoCoH facets",
 ):
 
     bins = [
@@ -1530,7 +2068,7 @@ def make_locoh_facets_layers(
         60,
         80,
         95,
-        100
+        100,
     ]
 
     palette = {
@@ -1553,28 +2091,21 @@ def make_locoh_facets_layers(
             "#fee8c8",
     }
 
-    def color_for(
-        pct: int
-    ) -> str:
+    def color_for(pct):
 
         for b in bins:
 
             if pct <= b:
+                return palette[b]
 
-                return palette[
-                    b
-                ]
-
-        return palette[
-            100
-        ]
+        return palette[100]
 
     layers = []
 
     animals_dict = (
         locoh_result.get(
             "animals",
-            {}
+            {},
         )
         if locoh_result
         else {}
@@ -1584,9 +2115,7 @@ def make_locoh_facets_layers(
 
         data = (
             animals_dict.get(
-                str(
-                    animal
-                )
+                str(animal)
             )
             or animals_dict.get(
                 animal
@@ -1599,7 +2128,7 @@ def make_locoh_facets_layers(
         facets = (
             data.get(
                 "facets",
-                []
+                [],
             )
         )
 
@@ -1613,14 +2142,14 @@ def make_locoh_facets_layers(
             pct = int(
                 f.get(
                     "cum_percent",
-                    100
+                    100,
                 )
             )
 
             area = float(
                 f.get(
                     "area_sq_km",
-                    0.0
+                    0.0,
                 )
             )
 
@@ -1631,9 +2160,7 @@ def make_locoh_facets_layers(
 
                     "properties": {
                         "animal_id":
-                            str(
-                                animal
-                            ),
+                            str(animal),
 
                         "cum_percent":
                             pct,
@@ -1641,7 +2168,7 @@ def make_locoh_facets_layers(
                         "area_km2":
                             round(
                                 area,
-                                3
+                                3,
                             ),
 
                         "_fill":
@@ -1665,14 +2192,12 @@ def make_locoh_facets_layers(
                 features,
         }
 
-        layer = (
-            folium.FeatureGroup(
-                name=(
-                    f"{animal} "
-                    f"{name_prefix}"
-                ),
-                show=True
-            )
+        layer = folium.FeatureGroup(
+            name=(
+                f"{animal} "
+                f"{name_prefix}"
+            ),
+            show=True,
         )
 
         folium.GeoJson(
@@ -1705,18 +2230,16 @@ def make_locoh_facets_layers(
                 fields=[
                     "animal_id",
                     "cum_percent",
-                    "area_km2"
+                    "area_km2",
                 ],
                 aliases=[
                     "Animal",
                     "Cum. %",
-                    "Hull area (km²)"
+                    "Hull area (km²)",
                 ],
                 localize=True,
             ),
-        ).add_to(
-            layer
-        )
+        ).add_to(layer)
 
         layers.append(
             layer
@@ -1733,7 +2256,7 @@ def make_dbbmm_layers(
     dbbmm_results: dict,
     animal_ids,
     color_map,
-    name_prefix: str = "dBBMM"
+    name_prefix: str = "dBBMM",
 ):
 
     layers = []
@@ -1742,9 +2265,7 @@ def make_dbbmm_layers(
 
         data = (
             dbbmm_results.get(
-                str(
-                    animal
-                )
+                str(animal)
             )
             or dbbmm_results.get(
                 animal
@@ -1756,7 +2277,7 @@ def make_dbbmm_layers(
 
         if isinstance(
             data,
-            dict
+            dict,
         ):
 
             tif_path = (
@@ -1778,7 +2299,7 @@ def make_dbbmm_layers(
                 getattr(
                     data,
                     "geotiff",
-                    None
+                    None,
                 )
             )
 
@@ -1786,7 +2307,7 @@ def make_dbbmm_layers(
                 getattr(
                     data,
                     "isopleths",
-                    []
+                    [],
                 )
                 or []
             )
@@ -1808,21 +2329,19 @@ def make_dbbmm_layers(
             )
         ):
 
-            raster_layer = (
-                folium.FeatureGroup(
-                    name=(
-                        f"{animal} "
-                        f"{name_prefix} Raster"
-                    ),
-                    show=True
-                )
+            raster_layer = folium.FeatureGroup(
+                name=(
+                    f"{animal} "
+                    f"{name_prefix} Raster"
+                ),
+                show=True,
             )
 
             try:
 
                 (
                     arr,
-                    bounds_ll
+                    bounds_ll,
                 ) = _raster_for_webmap(
                     tif_path
                 )
@@ -1838,7 +2357,7 @@ def make_dbbmm_layers(
                         image=img,
                         bounds=bounds_ll,
                         opacity=0.80,
-                        interactive=False
+                        interactive=False,
                     )
                 )
 
@@ -1849,8 +2368,9 @@ def make_dbbmm_layers(
             except Exception as exc:
 
                 print(
-                    f"[map] dBBMM raster display error "
-                    f"for animal={animal}: {exc}"
+                    "[map] dBBMM raster display "
+                    f"error for animal={animal}: "
+                    f"{exc}"
                 )
 
         # ---------------------------------------------------------------------
@@ -1874,19 +2394,17 @@ def make_dbbmm_layers(
             area_km2 = float(
                 item.get(
                     "area_sq_km",
-                    0.0
+                    0.0,
                 )
             )
 
-            layer = (
-                folium.FeatureGroup(
-                    name=(
-                        f"{animal} "
-                        f"{name_prefix} "
-                        f"{percent}%"
-                    ),
-                    show=True
-                )
+            layer = folium.FeatureGroup(
+                name=(
+                    f"{animal} "
+                    f"{name_prefix} "
+                    f"{percent}%"
+                ),
+                show=True,
             )
 
             if geom:
@@ -1898,9 +2416,7 @@ def make_dbbmm_layers(
 
                         "properties": {
                             "animal_id":
-                                str(
-                                    animal
-                                ),
+                                str(animal),
 
                             "percent":
                                 percent,
@@ -1908,7 +2424,7 @@ def make_dbbmm_layers(
                             "area_km2":
                                 round(
                                     area_km2,
-                                    3
+                                    3,
                                 ),
                         },
 
@@ -1933,18 +2449,16 @@ def make_dbbmm_layers(
                         fields=[
                             "animal_id",
                             "percent",
-                            "area_km2"
+                            "area_km2",
                         ],
                         aliases=[
                             "Animal",
                             "Isopleth (%)",
-                            "Area (km²)"
+                            "Area (km²)",
                         ],
                         localize=True,
                     ),
-                ).add_to(
-                    layer
-                )
+                ).add_to(layer)
 
             layers.append(
                 layer
@@ -1970,32 +2484,22 @@ def build_results_map(
 ):
 
     m = _base_map(
-        df[
-            "latitude"
-        ].mean(),
-        df[
-            "longitude"
-        ].mean(),
+        df["latitude"].mean(),
+        df["longitude"].mean(),
         control_scale=True,
-        zoom=9
+        zoom=9,
     )
 
     animal_ids = (
-        df[
-            "animal_id"
-        ].unique()
-        if "animal_id"
-        in df.columns
-        else [
-            "sample"
-        ]
+        df["animal_id"].unique()
+        if "animal_id" in df.columns
+        else ["sample"]
     )
 
     color_map = {
         aid:
             f"#{random.randint(0, 0xFFFFFF):06x}"
-        for aid
-        in animal_ids
+        for aid in animal_ids
     }
 
     # -------------------------------------------------------------------------
@@ -2004,70 +2508,53 @@ def build_results_map(
 
     (
         points_layer,
-        tracks_layer
+        tracks_layer,
     ) = make_points_tracks_layers(
         df,
-        color_map
+        color_map,
     )
 
-    points_layer.add_to(
-        m
-    )
-
-    tracks_layer.add_to(
-        m
-    )
+    points_layer.add_to(m)
+    tracks_layer.add_to(m)
 
     # -------------------------------------------------------------------------
     # MCP
     # -------------------------------------------------------------------------
 
     for layer in make_mcp_layers(
-        mcp_results
-        or {},
-        requested_percents
-        or [],
+        mcp_results or {},
+        requested_percents or [],
         animal_ids,
-        color_map
+        color_map,
     ):
 
-        layer.add_to(
-            m
-        )
+        layer.add_to(m)
 
     # -------------------------------------------------------------------------
     # KDE
     # -------------------------------------------------------------------------
 
     for layer in make_kde_layers(
-        kde_results
-        or {},
-        requested_kde_percents
-        or [],
+        kde_results or {},
+        requested_kde_percents or [],
         animal_ids,
-        color_map
+        color_map,
     ):
 
-        layer.add_to(
-            m
-        )
+        layer.add_to(m)
 
     # -------------------------------------------------------------------------
     # AKDE
     # -------------------------------------------------------------------------
 
     for layer in make_akde_layers(
-        akde_results
-        or {},
-        requested_akde_percents
-        or [],
+        akde_results or {},
+        requested_akde_percents or [],
         animal_ids,
-        color_map
+        color_map,
     ):
 
-        layer.add_to(
-            m
-        )
+        layer.add_to(m)
 
     # -------------------------------------------------------------------------
     # LoCoH
@@ -2079,23 +2566,19 @@ def build_results_map(
             locoh_result,
             animal_ids,
             color_map,
-            name_prefix="LoCoH"
+            name_prefix="LoCoH",
         ):
 
-            layer.add_to(
-                m
-            )
+            layer.add_to(m)
 
         for layer in make_locoh_facets_layers(
             locoh_result,
             animal_ids,
             color_map,
-            name_prefix="LoCoH facets"
+            name_prefix="LoCoH facets",
         ):
 
-            layer.add_to(
-                m
-            )
+            layer.add_to(m)
 
     # -------------------------------------------------------------------------
     # dBBMM
@@ -2107,36 +2590,43 @@ def build_results_map(
             dbbmm_result,
             animal_ids,
             color_map,
-            name_prefix="dBBMM"
+            name_prefix="dBBMM",
         ):
 
-            layer.add_to(
-                m
-            )
+            layer.add_to(m)
 
     # -------------------------------------------------------------------------
-    # Controls
+    # Layer control
     # -------------------------------------------------------------------------
 
     folium.LayerControl(
-        collapsed=False
-    ).add_to(
-        m
-    )
+        collapsed=False,
+    ).add_to(m)
 
+    # Styling, including white Blank-map canvas
     _add_layer_control_style_patch(
         m
     )
 
+    # Group analytical layers by animal and add explicit
+    # All Layers On / All Layers Off controls
+    _add_grouped_layer_control_patch(
+        m,
+        animal_ids,
+    )
+
+    # Keep any other custom Spatchat map-control behavior
     apply_map_control_patches(
         m
     )
 
+    # -------------------------------------------------------------------------
+    # Initial map extent
+    # -------------------------------------------------------------------------
+
     m = fit_map_to_bounds(
         m,
-        df
+        df,
     )
 
-    return (
-        m._repr_html_()
-    )
+    return m._repr_html_()
