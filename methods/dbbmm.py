@@ -1,6 +1,4 @@
-# =============================================
-# File: methods/dbbmm.py
-# =============================================
+# methods/dbbmm.py
 
 from __future__ import annotations
 
