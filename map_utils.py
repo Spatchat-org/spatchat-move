@@ -356,6 +356,8 @@ def render_empty_map():
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr="CartoDB").add_to(m)
     folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", attr="OpenTopoMap", name="Topographic").add_to(m)
+    from map_layers import BLANK_TILE
+    folium.TileLayer(tiles=BLANK_TILE, attr=" ", name="Blank").add_to(m)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri",
@@ -363,7 +365,16 @@ def render_empty_map():
     ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     apply_map_control_patches(m)
-    return m._repr_html_()
+    hint = """
+    <div class="spatchat-map-empty-hint">
+      <div class="spatchat-map-empty-hint-card">
+        <div class="spatchat-map-empty-hint-icon">📍</div>
+        <div>Drop a CSV here, or click + to start</div>
+        <div class="spatchat-map-empty-hint-sub">Coordinates required &middot; timestamps and animal IDs optional</div>
+      </div>
+    </div>
+    """
+    return hint + m._repr_html_()
 
 
 def fit_map_to_bounds(m, df):

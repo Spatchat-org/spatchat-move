@@ -40,6 +40,13 @@ from storage import (
 )
 
 from llm_utils import ask_llm, ask_llm_stream
+
+try:
+    from spatchat_gate import metered_chat
+except ImportError:  # launched without spatchat-gateway's client/ on PYTHONPATH
+    def metered_chat(**_kwargs):
+        return lambda fn: fn
+
 from crs_utils import parse_crs_input
 from map_utils import render_empty_map
 from coords_utils import looks_like_latlon, looks_invalid_latlon, parse_levels_from_text
@@ -933,67 +940,43 @@ def _merge_figure_history(existing: list[dict] | None, discovered: list[dict]) -
     return merged, active_index
 
 
+_EMPTY_PLOTS_HTML = '<div class="spatchat-empty-state"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg><div class="spatchat-empty-title">No plots yet</div><div class="spatchat-empty-text">Upload a dataset, then ask for an analysis such as &ldquo;run movement analysis&rdquo; or &ldquo;95% KDE&rdquo;. Plots and tables will appear here.</div></div>'
+
+
 def _render_figure_viewer(figures: list[dict] | None, active_index: int = 0) -> str:
     figures = list(figures or [])
     if not figures:
-        return '<div class="spatchat-figure-root" data-payload=""></div>'
+        return '<div class="spatchat-figure-root" data-payload=""></div>' + _EMPTY_PLOTS_HTML
 
-    resolved_index = max(0, min(int(active_index or 0), len(figures) - 1))
-    active = figures[resolved_index]
-    payload = html.escape(json.dumps({
-        "figures": figures,
-        "activeIndex": resolved_index,
-        "isOpen": True,
-        "isMinimized": False,
-        "width": 560,
-        "height": 460,
-        "x": None,
-        "y": None,
-    }), quote=True)
-    title = html.escape(str(active.get("title") or "Figure"))
-    subtitle = html.escape(str(active.get("subtitle") or ""))
-    image_src = html.escape(str(active.get("src") or ""), quote=True)
-    table_html = str(active.get("tableHtml") or "")
-    back_disabled = "disabled" if resolved_index <= 0 else ""
-    forward_disabled = "disabled" if resolved_index >= len(figures) - 1 else ""
-    return f"""
-    <div class="spatchat-figure-root" data-payload="{payload}">
-      <button class="spatchat-figure-launcher" type="button" data-action="open" aria-label="Open plots and tables" onclick="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleAction(this, event) : false;">
-        Plots/Tables ({len(figures)})
-      </button>
-      <div class="spatchat-figure-modal-backdrop"></div>
-      <div class="spatchat-figure-interaction-shield"></div>
-      <section class="spatchat-figure-modal" aria-label="Figure viewer" role="dialog" aria-modal="true">
-        <header class="spatchat-figure-modal-head" onmousedown="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleDrag(this, event) : false;">
-          <div class="spatchat-figure-modal-copy">
-            <div class="spatchat-figure-modal-title">Plots &amp; Tables</div>
-            <div class="spatchat-figure-modal-count">{resolved_index + 1} / {len(figures)}</div>
-          </div>
-          <div class="spatchat-figure-modal-nav">
-            <button class="spatchat-figure-modal-btn" type="button" data-action="back" aria-label="Previous figure" onclick="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleAction(this, event) : false;" {back_disabled}>&larr;</button>
-            <button class="spatchat-figure-modal-btn" type="button" data-action="forward" aria-label="Next figure" onclick="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleAction(this, event) : false;" {forward_disabled}>&rarr;</button>
-            <button class="spatchat-figure-modal-btn spatchat-figure-modal-btn-close" type="button" data-action="close" aria-label="Hide figure viewer" onclick="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleAction(this, event) : false;">_</button>
-          </div>
-        </header>
-        <div class="spatchat-figure-modal-body">
-          <article class="spatchat-figure-card">
-            <div class="spatchat-figure-card-title">{title}</div>
-            <div class="spatchat-figure-card-meta">{subtitle}</div>
-            <img class="spatchat-figure-card-image" alt="{title}" src="{image_src}" style="display:{'block' if image_src else 'none'};" />
-            <div class="spatchat-figure-card-table" style="display:{'block' if table_html else 'none'};">{table_html}</div>
-          </article>
-        </div>
-        <div class="spatchat-figure-resize-handle is-n" data-resize="n" onmousedown="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleResize(this, event) : false;"></div>
-        <div class="spatchat-figure-resize-handle is-e" data-resize="e" onmousedown="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleResize(this, event) : false;"></div>
-        <div class="spatchat-figure-resize-handle is-s" data-resize="s" onmousedown="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleResize(this, event) : false;"></div>
-        <div class="spatchat-figure-resize-handle is-w" data-resize="w" onmousedown="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleResize(this, event) : false;"></div>
-        <div class="spatchat-figure-resize-handle is-ne" data-resize="ne" onmousedown="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleResize(this, event) : false;"></div>
-        <div class="spatchat-figure-resize-handle is-nw" data-resize="nw" onmousedown="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleResize(this, event) : false;"></div>
-        <div class="spatchat-figure-resize-handle is-se" data-resize="se" title="Resize figure viewer" onmousedown="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleResize(this, event) : false;"></div>
-        <div class="spatchat-figure-resize-handle is-sw" data-resize="sw" onmousedown="return window.spatchatFigureViewer ? window.spatchatFigureViewer.handleResize(this, event) : false;"></div>
-      </section>
-    </div>
-    """
+    latest = max(0, min(int(active_index or 0), len(figures) - 1))
+    cards = []
+    for idx, fig in enumerate(figures):
+        title = html.escape(str(fig.get("title") or "Figure"), quote=True)
+        subtitle = html.escape(str(fig.get("subtitle") or ""), quote=True)
+        src = html.escape(str(fig.get("src") or ""), quote=True)
+        table_html = str(fig.get("tableHtml") or "")
+        if src:
+            preview = f'<img class="spatchat-thumb-img" alt="{title}" src="{src}" loading="lazy" />'
+        else:
+            preview = f'<div class="spatchat-thumb-table">{table_html}</div>'
+        badge = '<span class="spatchat-thumb-badge">New</span>' if idx == latest and len(figures) > 1 else ""
+        cards.append(
+            f'<button type="button" class="spatchat-thumb" data-title="{title}" data-subtitle="{subtitle}" '
+            f'onclick="return window.spatchatGallery ? window.spatchatGallery.open(this) : false;" aria-label="Enlarge {title}">'
+            f'<span class="spatchat-thumb-preview">{preview}</span>'
+            f'<span class="spatchat-thumb-meta"><span class="spatchat-thumb-title">{title}</span>'
+            f'<span class="spatchat-thumb-sub">{subtitle}</span></span>{badge}'
+            f'<span class="spatchat-thumb-zoom">Enlarge</span></button>'
+        )
+    count = len(figures)
+    label = "1 plot or table" if count == 1 else f"{count} plots and tables"
+    return (
+        '<div class="spatchat-gallery">'
+        f'<div class="spatchat-gallery-bar"><span>{label}</span><span class="spatchat-gallery-hint">Click any item to enlarge</span></div>'
+        f'<div class="spatchat-gallery-grid">{"".join(cards)}</div>'
+        '</div>'
+    )
+
 
 # --------------------------------------------------------------------------------------
 # Upload flow
@@ -1220,7 +1203,159 @@ def confirm_and_hint(x_col, y_col, crs_text, chat_history, session_id):
     return map_html, chat, session_id
 
 
+MAX_UPLOAD_MB = 20
+_DATASHEET_MAX_ROWS = 500
+_NEXT_TAB: dict[str, str] = {}
+_DATA_TAB_RE = re.compile(
+    r"\b(analy[sz]e|summari[sz]e|describe|show|view|see|display|preview|look at|open)\b.*\b(data|dataset|datasheet|table|rows|columns|csv)\b"
+    r"|\b(datasheet|data ?frame|data preview)\b",
+    re.IGNORECASE,
+)
+
+
+_EMPTY_DATA_HTML = (
+    '<div class="spatchat-empty-state"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/>'
+    '<path d="M3 10h18M9 4v16"/></svg><div class="spatchat-empty-title">No data loaded</div>'
+    '<div class="spatchat-empty-text">Click + in the chat or choose &ldquo;Try sample data&rdquo; to load a movement CSV. '
+    'Your table will appear here.</div></div>'
+)
+
+
+def _datasheet_df_updates(df):
+    if df is None:
+        return gr.update(value=None, visible=False), gr.update(visible=True)
+    return gr.update(value=df.head(_DATASHEET_MAX_ROWS), visible=True), gr.update(visible=False)
+
+
+def _datasheet_update(session_id):
+    _activate_session(session_id)
+    return _datasheet_df_updates(get_cached_df())
+
+
+# ---- dataset library: every uploaded dataset keeps its own map, plots and table ----
+def _new_library() -> dict:
+    return {"items": [], "active": None}
+
+
+def _dataset_selector_update(library: dict):
+    items = library.get("items") or []
+    return gr.update(
+        choices=[(it["name"], it["id"]) for it in items],
+        value=library.get("active"),
+        visible=bool(items),
+    )
+
+
+def _register_dataset(label, session_id, library, figure_state, map_html):
+    library = dict(library or _new_library())
+    items = list(library.get("items") or [])
+    _activate_session(session_id)
+    df = get_cached_df()
+    if df is None or any(it.get("ref") is df for it in items):
+        library["items"] = items
+        return library, _dataset_selector_update(library)
+    base = os.path.basename(str(label or "Dataset")) or "Dataset"
+    name, n = base, 2
+    existing = {it["name"] for it in items}
+    while name in existing:
+        name = f"{base} ({n})"
+        n += 1
+    item = {
+        "id": uuid.uuid4().hex[:8],
+        "name": name,
+        "df": df,
+        "ref": df,
+        "figures": list(figure_state or []),
+        "map_html": map_html,
+    }
+    items.append(item)
+    library["items"] = items
+    library["active"] = item["id"]
+    return library, _dataset_selector_update(library)
+
+
+def _sync_active_dataset(session_id, library, figure_state, map_html):
+    library = dict(library or _new_library())
+    items = list(library.get("items") or [])
+    _activate_session(session_id)
+    df = get_cached_df()
+    for idx, it in enumerate(items):
+        if it["id"] == library.get("active"):
+            it = dict(it)
+            if df is not None:
+                it["df"] = df
+                it["ref"] = df
+            it["figures"] = list(figure_state or [])
+            if isinstance(map_html, str) and map_html:
+                it["map_html"] = map_html
+            items[idx] = it
+    library["items"] = items
+    return library
+
+
+def _switch_dataset(selected_id, library, session_id, chat_history):
+    library = dict(library or _new_library())
+    item = next((it for it in library.get("items") or [] if it["id"] == selected_id), None)
+    if item is None:
+        return (gr.skip(),) * 7 + (library,)
+    _activate_session(session_id)
+    df = item["df"]
+    set_cached_df(df)
+    set_cached_headers(list(df.columns))
+    _remember_dataset_session(session_id)
+    _persist_session_dataframe(session_id, df)
+    library["active"] = item["id"]
+    figures = list(item.get("figures") or [])
+    chat = list(chat_history or []) + [{"role": "assistant", "content": f"Switched to **{item['name']}**. Its map, plots and table are shown on the right."}]
+    sheet, sheet_empty = _datasheet_df_updates(df)
+    return (
+        chat,
+        item.get("map_html") or render_empty_map(),
+        _render_figure_viewer(figures),
+        figures,
+        sheet,
+        sheet_empty,
+        _select_tab("map"),
+        library,
+    )
+
+
+def _chip_js(text: str) -> str:
+    return (
+        "() => { const ta = document.querySelector('#spatchat-user-input textarea, #spatchat-user-input input');"
+        " if (!ta) return; ta.focus(); ta.value = " + json.dumps(text) + ";"
+        " ta.dispatchEvent(new Event('input', { bubbles: true }));"
+        " setTimeout(() => { const b = document.querySelector('#spatchat-send-btn'); if (b) b.click(); }, 80); }"
+    )
+
+
+_SUGGESTION_CHIPS = [
+    "Run movement analysis",
+    "95% KDE",
+    "100% MCP",
+    "AKDE 95",
+    "Behavioral states (HMM)",
+]
+
+
+def _select_tab(name: str):
+    return gr.Tabs(selected=name)
+
+
+def _consume_next_tab(session_id):
+    tab = _NEXT_TAB.pop(session_id or "", None)
+    return _select_tab(tab) if tab else gr.skip()
+
+
 def _handle_upload_initial_ui(file, chat_history, session_id, figure_state):
+    try:
+        too_big = file is not None and os.path.getsize(file) > MAX_UPLOAD_MB * 1024 * 1024
+    except OSError:
+        too_big = False
+    if too_big:
+        next_chat = list(chat_history or []) + [{"role": "assistant", "content": f"That file is too large. Please upload a CSV under {MAX_UPLOAD_MB} MB."}]
+        return (next_chat, *([gr.skip()] * 13))
     result = handle_upload_initial(file, session_id)
     empty_figures = []
     next_chat = list(chat_history or [])
@@ -1230,20 +1365,48 @@ def _handle_upload_initial_ui(file, chat_history, session_id, figure_state):
     return (next_chat, gr.update(value=""), *result[1:], _render_figure_viewer(empty_figures), empty_figures)
 
 
+_SAMPLE_DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data", "demo_movement.csv")
+
+
+def _load_sample_data_ui(chat_history, session_id, figure_state):
+    return _handle_upload_initial_ui(_SAMPLE_DATA_PATH, chat_history, session_id, figure_state)
+
+
 def _confirm_and_hint_ui(x_col, y_col, crs_text, chat_history, session_id):
     map_html, chat, session_id = confirm_and_hint(x_col, y_col, crs_text, chat_history, session_id)
     return map_html, chat, gr.update(value=""), session_id
 
 
+def _is_skip(value) -> bool:
+    return value is None or (isinstance(value, dict) and "value" not in value)
+
+
 def _handle_chat_ui(chat_history, user_message, session_id, figure_state):
     active_session_id = _activate_session(session_id)
+    baseline_figures = _render_figure_viewer(figure_state)
+    next_tab = "data" if _DATA_TAB_RE.search(str(user_message or "")) else None
     for update in handle_chat(chat_history, user_message, active_session_id, figure_state):
-        if isinstance(update, tuple):
+        if isinstance(update, (tuple, list)):
+            update = tuple(update)
+            figs = update[4] if len(update) > 4 else None
+            figs_html = figs.get("value") if isinstance(figs, dict) else figs
+            if isinstance(figs_html, str) and figs_html != baseline_figures:
+                next_tab = "plots"
+            elif next_tab is None and len(update) > 1 and not _is_skip(update[1]):
+                next_tab = "map"
             yield (*update, active_session_id)
-        elif isinstance(update, list):
-            yield (*tuple(update), active_session_id)
         else:
             yield update
+    if next_tab:
+        _NEXT_TAB[active_session_id] = next_tab
+
+
+def _chat_denied(markdown, chat_history, user_message, session_id, figure_state):
+    history = list(chat_history or []) + [
+        {"role": "user", "content": str(user_message or "")},
+        {"role": "assistant", "content": markdown},
+    ]
+    return history, gr.skip(), gr.skip(), _status_clear_update(), gr.skip(), figure_state, session_id
 
 
 def _status_message(label: str, started_at: float | None = None) -> str:
@@ -1251,8 +1414,9 @@ def _status_message(label: str, started_at: float | None = None) -> str:
     if started_at is not None:
         seconds = max(0, int(time.time() - started_at))
         elapsed = f"<span class='spatchat-status-time'>Working for {seconds}s</span>"
+    dots = "<span class='spatchat-typing-dots'><span></span><span></span><span></span></span>"
     return (
-        f"<span class='spatchat-status'><span class='spatchat-status-dot'></span>{label}</span>"
+        f"<span class='spatchat-status'>{dots}{label}</span>"
         + (f" {elapsed}" if elapsed else "")
     )
 
@@ -1364,6 +1528,8 @@ def handle_chat(chat_history, user_message, session_id, figure_state):
 
     pending = _pending_questions(session_id)
     normalized_msg = re.sub(r"\bbbmm\b", "dbbmm", msg, flags=re.IGNORECASE)
+    if re.fullmatch(r"\s*(please\s+)?(run\s+|do\s+)?analy[sz]e(\s+(the|my)\s+(data|dataset|movement(\s+data)?))?\s*[.!]*\s*", msg, flags=re.IGNORECASE):
+        normalized_msg = "movement analysis"
 
     cmd = parse_metadata_command(normalized_msg)
     if cmd:
@@ -1909,6 +2075,157 @@ window.spatchatWatchChatScroll = () => {
   scrollNow();
 };
 
+window.spatchatFitViewport = function() {
+  const workarea = document.getElementById("spatchat-workarea");
+  if (!workarea) return false;
+  const top = workarea.getBoundingClientRect().top;
+  const available = Math.max(360, Math.round(window.innerHeight - top - 12));
+  workarea.style.height = available + "px";
+  return true;
+};
+
+window.spatchatLockSidebarScrollX = function() {
+  const sidebar = document.getElementById("spatchat-sidebar");
+  if (!sidebar || sidebar.__spatchatScrollXLock) return !!sidebar;
+  sidebar.__spatchatScrollXLock = true;
+  sidebar.addEventListener("scroll", () => {
+    if (sidebar.scrollLeft !== 0) sidebar.scrollLeft = 0;
+  });
+  return true;
+};
+
+(function initFitViewportWithRetry() {
+  let resizeTimer = 0;
+  function onResize() {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => window.spatchatFitViewport && window.spatchatFitViewport(), 100);
+  }
+  function tryInit() {
+    window.spatchatLockSidebarScrollX && window.spatchatLockSidebarScrollX();
+    if (window.spatchatFitViewport()) {
+      window.addEventListener("resize", onResize);
+      return;
+    }
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts += 1;
+      window.spatchatLockSidebarScrollX && window.spatchatLockSidebarScrollX();
+      if (window.spatchatFitViewport() || attempts > 40) {
+        clearInterval(timer);
+        window.addEventListener("resize", onResize);
+      }
+    }, 250);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", tryInit, { once: true });
+  } else {
+    tryInit();
+  }
+})();
+
+window.spatchatGallery = (() => {
+  let items = [];
+  let idx = 0;
+  let box = null;
+
+  function ensure() {
+    if (box) return box;
+    box = document.createElement("div");
+    box.id = "spatchat-lightbox";
+    box.innerHTML =
+      '<div class="sl-backdrop" data-sl="close"></div>' +
+      '<section class="sl-panel" role="dialog" aria-modal="true" aria-label="Enlarged figure">' +
+      '<header class="sl-head"><div class="sl-copy"><div class="sl-title"></div><div class="sl-sub"></div></div>' +
+      '<div class="sl-nav"><span class="sl-count"></span>' +
+      '<button type="button" data-sl="prev" aria-label="Previous">&larr;</button>' +
+      '<button type="button" data-sl="next" aria-label="Next">&rarr;</button>' +
+      '<button type="button" data-sl="close" class="sl-close" aria-label="Close">&times;</button></div></header>' +
+      '<div class="sl-body"></div></section>';
+    box.addEventListener("click", (event) => {
+      const target = event.target.closest("[data-sl]");
+      if (!target) return;
+      const action = target.dataset.sl;
+      if (action === "close") close();
+      if (action === "prev") show(idx - 1);
+      if (action === "next") show(idx + 1);
+    });
+    document.body.appendChild(box);
+    document.addEventListener("keydown", (event) => {
+      if (!box.classList.contains("open")) return;
+      if (event.key === "Escape") close();
+      if (event.key === "ArrowLeft") show(idx - 1);
+      if (event.key === "ArrowRight") show(idx + 1);
+    });
+    return box;
+  }
+
+  function show(i) {
+    if (!items.length) return;
+    idx = Math.max(0, Math.min(items.length - 1, i));
+    const item = items[idx];
+    const b = ensure();
+    b.querySelector(".sl-title").textContent = item.title;
+    b.querySelector(".sl-sub").textContent = item.subtitle;
+    b.querySelector(".sl-count").textContent = (idx + 1) + " / " + items.length;
+    b.querySelector('[data-sl="prev"]').disabled = idx <= 0;
+    b.querySelector('[data-sl="next"]').disabled = idx >= items.length - 1;
+    const body = b.querySelector(".sl-body");
+    body.innerHTML = "";
+    if (item.src) {
+      const img = document.createElement("img");
+      img.src = item.src;
+      img.alt = item.title;
+      body.appendChild(img);
+    } else {
+      const table = document.createElement("div");
+      table.className = "sl-table";
+      table.innerHTML = item.table;
+      body.appendChild(table);
+    }
+    body.scrollTop = 0;
+  }
+
+  function open(el) {
+    const gallery = el.closest(".spatchat-gallery");
+    if (!gallery) return false;
+    const thumbs = Array.from(gallery.querySelectorAll(".spatchat-thumb"));
+    items = thumbs.map((t) => ({
+      title: t.dataset.title || "Figure",
+      subtitle: t.dataset.subtitle || "",
+      src: (t.querySelector("img") || {}).src || "",
+      table: (t.querySelector(".spatchat-thumb-table") || {}).innerHTML || "",
+    }));
+    ensure().classList.add("open");
+    document.body.classList.add("spatchat-lightbox-open");
+    show(thumbs.indexOf(el));
+    return false;
+  }
+
+  function close() {
+    if (box) box.classList.remove("open");
+    document.body.classList.remove("spatchat-lightbox-open");
+  }
+
+  return { open, close };
+})();
+
+window.spatchatApplyTheme = function(theme) {
+  const dark = theme === "dark";
+  document.documentElement.classList.toggle("spatchat-dark", dark);
+  document.body.classList.toggle("spatchat-dark", dark);
+  document.body.classList.toggle("dark", dark);
+  try { localStorage.setItem("spatchat-theme", dark ? "dark" : "light"); } catch (e) {}
+};
+window.spatchatToggleTheme = function() {
+  window.spatchatApplyTheme(document.body.classList.contains("spatchat-dark") ? "light" : "dark");
+};
+(function initSpatchatTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem("spatchat-theme"); } catch (e) {}
+  const apply = () => window.spatchatApplyTheme(saved === "dark" ? "dark" : "light");
+  if (document.body) apply(); else document.addEventListener("DOMContentLoaded", apply, { once: true });
+})();
+
 window.spatchatFigureViewer = (() => {
   const selector = ".spatchat-figure-root[data-payload]";
   const layerId = "spatchat-figure-layer";
@@ -2240,11 +2557,127 @@ window.spatchatFigureViewer = (() => {
 
   return { initForLayer, render, handleAction, handleDrag, handleResize };
 })();
+
+window.spatchatInitMapDropzone = function() {
+  const mapcol = document.getElementById("spatchat-mapcol");
+  const mapHost = document.getElementById("spatchat-map");
+  if (!mapcol || !mapHost) return false;
+  if (mapHost.__spatchatDropzoneInit) return true;
+  mapHost.__spatchatDropzoneInit = true;
+
+  function hasFiles(event) {
+    return event.dataTransfer && Array.from(event.dataTransfer.types || []).includes("Files");
+  }
+
+  function dropFiles(files) {
+    if (!files || !files.length) return;
+    const hiddenInput = document.querySelector('#spatchat-input-row input[type="file"]');
+    if (!hiddenInput) return;
+    const dt = new DataTransfer();
+    dt.items.add(files[0]);
+    hiddenInput.files = dt.files;
+    hiddenInput.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function bindTarget(target) {
+    target.addEventListener("dragover", (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      mapcol.classList.add("spatchat-map-dragover");
+    });
+    target.addEventListener("dragleave", () => {
+      mapcol.classList.remove("spatchat-map-dragover");
+    });
+    target.addEventListener("drop", (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      mapcol.classList.remove("spatchat-map-dragover");
+      dropFiles(event.dataTransfer.files);
+    });
+  }
+
+  // Covers the mapcol area outside the map iframe (padding/margins).
+  bindTarget(mapcol);
+
+  // The Leaflet map itself renders inside a same-origin iframe, which does
+  // not bubble native drag/drop events to the parent document, so it needs
+  // its own listeners. The iframe element is re-used across map updates but
+  // its contentDocument is replaced on every reload, so re-wire on "load".
+  function wireIframeDoc(iframe) {
+    if (!iframe) return;
+    const wire = () => {
+      let doc;
+      try {
+        doc = iframe.contentDocument;
+      } catch (e) {
+        return;
+      }
+      if (!doc || doc.__spatchatDropWired) return;
+      doc.__spatchatDropWired = true;
+      bindTarget(doc);
+    };
+    iframe.addEventListener("load", wire);
+    wire();
+  }
+
+  const existingIframe = mapHost.querySelector("iframe");
+  if (existingIframe) wireIframeDoc(existingIframe);
+
+  const observer = new MutationObserver(() => {
+    const iframe = mapHost.querySelector("iframe");
+    if (iframe) wireIframeDoc(iframe);
+  });
+  observer.observe(mapHost, { childList: true, subtree: true });
+
+  return true;
+};
+
+(function initMapDropzoneWithRetry() {
+  function setUploadTooltip() {
+    const btn = document.getElementById("spatchat-file-input");
+    if (btn && !btn.title) {
+      btn.title = "Upload movement CSV (.csv or .txt) — or drag a file onto the map";
+    }
+    return !!btn;
+  }
+
+  function tryInit() {
+    document.addEventListener("dragover", (event) => {
+      if (event.dataTransfer && Array.from(event.dataTransfer.types || []).includes("Files")) {
+        event.preventDefault();
+      }
+    });
+    document.addEventListener("drop", (event) => {
+      if (event.dataTransfer && Array.from(event.dataTransfer.types || []).includes("Files") && !event.defaultPrevented) {
+        event.preventDefault();
+      }
+    });
+    const dropzoneReady = window.spatchatInitMapDropzone();
+    const tooltipReady = setUploadTooltip();
+    if (dropzoneReady && tooltipReady) return;
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts += 1;
+      const dzOk = window.spatchatInitMapDropzone();
+      const ttOk = setUploadTooltip();
+      if ((dzOk && ttOk) || attempts > 40) {
+        clearInterval(timer);
+      }
+    }, 250);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", tryInit, { once: true });
+  } else {
+    tryInit();
+  }
+})();
 </script>
 """
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     session_state = gr.State(None)
+    library_state = gr.State(_new_library())
     figure_state = gr.State([])
     image_kwargs = {
         "value": "logo_long1.png",
@@ -2254,11 +2687,20 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     }
     if _component_accepts_kw(gr.Image, "buttons"):
         image_kwargs["buttons"] = []
-    gr.Image(**image_kwargs)
     gr.HTML("""
     <style>
     :root {
-        --spatchat-connect-bg: #0b0f19;
+        --spatchat-connect-bg: #f5f8f5;
+        --spatchat-surface: #ffffff;
+        --spatchat-surface-alt: #eef3ee;
+        --spatchat-border: rgba(16, 36, 26, 0.1);
+        --spatchat-text: #10241a;
+        --spatchat-text-secondary: #5c6b63;
+        --spatchat-text-subtle: #8a978f;
+        --spatchat-accent: #1f7a4f;
+        --spatchat-accent-hover: #17603d;
+        --spatchat-accent-soft: #e3f2e8;
+        --spatchat-shadow: 0 1px 3px rgba(16, 36, 26, 0.08), 0 1px 2px rgba(16, 36, 26, 0.06);
     }
     :host,
     html,
@@ -2273,19 +2715,25 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-mapcol,
     #spatchat-splitter {
         background: var(--spatchat-connect-bg) !important;
+        color: var(--spatchat-text) !important;
     }
     .gradio-container {
         max-width: 100% !important;
         padding-left: 4px !important;
         padding-right: 4px !important;
+        overflow: visible !important;
     }
     #spatchat-workarea {
         overflow-x: auto;
-        overflow-y: visible;
+        overflow-y: hidden;
+        height: 80vh;
         padding-bottom: 8px;
+        box-sizing: border-box;
     }
     #spatchat-workarea > .gradio-row {
         min-width: 900px;
+        min-height: 0;
+        height: 100%;
         align-items: stretch;
         flex-wrap: nowrap;
         gap: 0 !important;
@@ -2295,56 +2743,61 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         max-width: 1200px;
         flex: 0 0 420px !important;
         width: 420px;
-        overflow: visible;
+        height: 100%;
+        display: flex !important;
+        flex-direction: column !important;
+        flex-wrap: nowrap !important;
+        overflow-y: auto;
+        overflow-x: clip;
         padding-right: 4px !important;
         font-size: 15px;
-        scrollbar-color: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) var(--background-fill-secondary);
+        scrollbar-color: #c9d3cb var(--spatchat-surface-alt);
         scrollbar-width: thin;
     }
     #spatchat-sidebar::-webkit-scrollbar {
         width: 12px;
     }
     #spatchat-sidebar::-webkit-scrollbar-track {
-        background: var(--background-fill-secondary);
+        background: var(--spatchat-surface-alt);
         border-radius: 999px;
     }
     #spatchat-sidebar::-webkit-scrollbar-thumb {
-        background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%);
+        background: #c9d3cb;
         border-radius: 999px;
-        border: 2px solid var(--background-fill-secondary);
+        border: 2px solid var(--spatchat-surface-alt);
     }
     #spatchat-sidebar::-webkit-scrollbar-thumb:hover {
-        background: color-mix(in srgb, var(--background-fill-secondary) 70%, white 30%);
+        background: #b5c1b7;
     }
     #spatchat-sidebar::-webkit-scrollbar-button:single-button {
         display: block;
         height: 12px;
-        background-color: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%);
+        background-color: #c9d3cb;
         border-radius: 999px;
-        border: 2px solid var(--background-fill-secondary);
+        border: 2px solid var(--spatchat-surface-alt);
         background-repeat: no-repeat;
         background-position: center;
         background-size: 7px 7px;
     }
     #spatchat-sidebar::-webkit-scrollbar-button:single-button:vertical:decrement {
-        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 6.5 5 3.5 8 6.5' fill='none' stroke='%23606b7a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 6.5 5 3.5 8 6.5' fill='none' stroke='%23516358' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
     #spatchat-sidebar::-webkit-scrollbar-button:single-button:vertical:increment {
-        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='%23606b7a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-    }
-    .dark #spatchat-sidebar {
-        scrollbar-color: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) var(--background-fill-secondary);
-    }
-    .dark #spatchat-sidebar::-webkit-scrollbar-thumb,
-    .dark #spatchat-sidebar::-webkit-scrollbar-button:single-button {
-        background-color: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%);
-        background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%);
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='%23516358' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
     #spatchat-sidebar > div {
         margin-left: 0 !important;
         margin-right: 0 !important;
     }
+    #spatchat-sidebar .form {
+        background: transparent !important;
+    }
+    #spatchat-sidebar label span,
+    #spatchat-sidebar .label-wrap span {
+        color: var(--spatchat-text-secondary) !important;
+    }
     #spatchat-chatbot,
+    #spatchat-input-row,
     #spatchat-user-input,
     #spatchat-file-input,
     #spatchat-x-col,
@@ -2360,8 +2813,9 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         padding-right: 0 !important;
         --chatbot-body-text-size: 16px;
         font-size: 16px !important;
-        height: 56vh !important;
-        min-height: 56vh !important;
+        flex: 1 1 auto !important;
+        height: auto !important;
+        min-height: 0 !important;
     }
     #spatchat-chatbot > div,
     #spatchat-chatbot .wrap,
@@ -2384,6 +2838,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot .message-row.panel.bot-row,
     #spatchat-chatbot .wrapper {
         background: var(--spatchat-connect-bg) !important;
+        color: var(--spatchat-text) !important;
     }
     #spatchat-chatbot,
     #spatchat-chatbot > div {
@@ -2391,11 +2846,22 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         border: none !important;
         box-shadow: none !important;
     }
+    #spatchat-chatbot .md,
+    #spatchat-chatbot .prose,
+    #spatchat-chatbot .md *,
+    #spatchat-chatbot .prose * {
+        color: var(--spatchat-text) !important;
+    }
+    #spatchat-chatbot code,
+    #spatchat-chatbot pre {
+        background: var(--spatchat-surface-alt) !important;
+        color: var(--spatchat-text) !important;
+    }
     #spatchat-chatbot,
     #spatchat-chatbot > div,
     #spatchat-chatbot .panel-wrap,
     #spatchat-chatbot .wrap {
-        scrollbar-color: rgba(133, 146, 171, 0.75) var(--spatchat-connect-bg);
+        scrollbar-color: #c9d3cb var(--spatchat-connect-bg);
         scrollbar-width: thin;
     }
     #spatchat-chatbot::-webkit-scrollbar,
@@ -2415,7 +2881,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot > div::-webkit-scrollbar-thumb,
     #spatchat-chatbot .panel-wrap::-webkit-scrollbar-thumb,
     #spatchat-chatbot .wrap::-webkit-scrollbar-thumb {
-        background: #323845;
+        background: #c9d3cb;
         border-radius: 999px;
         border: 2px solid var(--spatchat-connect-bg);
     }
@@ -2423,7 +2889,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot > div::-webkit-scrollbar-thumb:hover,
     #spatchat-chatbot .panel-wrap::-webkit-scrollbar-thumb:hover,
     #spatchat-chatbot .wrap::-webkit-scrollbar-thumb:hover {
-        background: #323845;
+        background: #b5c1b7;
     }
     #spatchat-chatbot::-webkit-scrollbar-button:single-button,
     #spatchat-chatbot > div::-webkit-scrollbar-button:single-button,
@@ -2431,7 +2897,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot .wrap::-webkit-scrollbar-button:single-button {
         display: block;
         height: 12px;
-        background-color: #323845;
+        background-color: #c9d3cb;
         border-radius: 999px;
         border: 2px solid var(--spatchat-connect-bg);
         background-repeat: no-repeat;
@@ -2442,23 +2908,30 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot > div::-webkit-scrollbar-button:single-button:vertical:decrement,
     #spatchat-chatbot .panel-wrap::-webkit-scrollbar-button:single-button:vertical:decrement,
     #spatchat-chatbot .wrap::-webkit-scrollbar-button:single-button:vertical:decrement {
-        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 6.5 5 3.5 8 6.5' fill='none' stroke='%23c7ced9' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 6.5 5 3.5 8 6.5' fill='none' stroke='%23516358' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
     #spatchat-chatbot::-webkit-scrollbar-button:single-button:vertical:increment,
     #spatchat-chatbot > div::-webkit-scrollbar-button:single-button:vertical:increment,
     #spatchat-chatbot .panel-wrap::-webkit-scrollbar-button:single-button:vertical:increment,
     #spatchat-chatbot .wrap::-webkit-scrollbar-button:single-button:vertical:increment {
-        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='%23c7ced9' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='%23516358' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
-    #spatchat-user-input {
-        background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important;
-        border-radius: 0 0 var(--radius-lg) var(--radius-lg) !important;
-        padding: 6px 10px !important;
-        margin-top: -8px !important;
+    #spatchat-input-row {
+        align-items: center !important;
+        gap: 8px !important;
+        flex-wrap: nowrap !important;
+        background: var(--spatchat-surface) !important;
+        border: 1px solid var(--spatchat-border) !important;
         border-top: none !important;
+        border-radius: 0 0 var(--radius-lg) var(--radius-lg) !important;
+        padding: 6px 8px !important;
+        margin-top: -8px !important;
     }
-    .dark #spatchat-user-input {
-        background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) !important;
+    #spatchat-input-row .form {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        background: transparent !important;
+        border: none !important;
     }
     #spatchat-chatbot {
         border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
@@ -2467,40 +2940,87 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot > div {
         border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
     }
+    #spatchat-file-input {
+        flex: 0 0 34px !important;
+        width: 34px !important;
+        height: 34px !important;
+        min-width: 34px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        border-radius: 50% !important;
+        border: none !important;
+        box-shadow: none !important;
+        background: var(--spatchat-accent) !important;
+        color: #ffffff !important;
+        font-size: 20px !important;
+        font-weight: 600 !important;
+        line-height: 1 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        transition: background 0.15s ease, transform 0.1s ease !important;
+    }
+    #spatchat-file-input:hover {
+        background: var(--spatchat-accent-hover) !important;
+    }
+    #spatchat-file-input:active {
+        transform: scale(0.92) !important;
+    }
+    #spatchat-sample-btn {
+        align-self: flex-start !important;
+        margin-top: 6px !important;
+        padding: 4px 10px !important;
+        min-width: 0 !important;
+        background: transparent !important;
+        color: var(--spatchat-accent) !important;
+        border: none !important;
+        box-shadow: none !important;
+        font-size: 12px !important;
+        font-weight: 600 !important;
+        transition: background 0.15s ease !important;
+    }
+    #spatchat-sample-btn:hover {
+        background: var(--spatchat-accent-soft) !important;
+        border-radius: var(--radius-md) !important;
+    }
+    #spatchat-user-input,
     #spatchat-user-input > div,
     #spatchat-user-input .wrap,
     #spatchat-user-input label {
         background: transparent !important;
+    }
+    #spatchat-user-input {
+        padding: 0 !important;
+        margin: 0 !important;
+        border: none !important;
+        box-shadow: none !important;
     }
     #spatchat-user-input .input-container {
         align-items: center !important;
     }
     #spatchat-user-input textarea,
     #spatchat-user-input input {
-        background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important;
+        background: transparent !important;
         border: none !important;
         box-shadow: none !important;
-        border-radius: var(--radius-md) !important;
-        min-height: 46px !important;
+        min-height: 34px !important;
         box-sizing: border-box !important;
-        padding: 12px !important;
+        padding: 8px 4px !important;
         line-height: 20px !important;
+        color: var(--spatchat-text) !important;
     }
     #spatchat-user-input textarea {
-        max-height: 240px !important;
+        max-height: 200px !important;
         overflow-y: auto !important;
         resize: vertical !important;
     }
     #spatchat-user-input input {
         overflow: hidden !important;
     }
-    .dark #spatchat-user-input textarea,
-    .dark #spatchat-user-input input {
-        background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) !important;
-    }
     #spatchat-user-input textarea::placeholder,
     #spatchat-user-input input::placeholder {
-        color: var(--body-text-color-subdued) !important;
+        color: var(--spatchat-text-subtle) !important;
         text-align: left !important;
     }
     #spatchat-chatbot .message-row.panel,
@@ -2528,11 +3048,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         border-bottom-left-radius: var(--radius-md) !important;
     }
     #spatchat-chatbot .flex-wrap.user {
-        background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important;
+        background: var(--spatchat-accent-soft) !important;
         border-bottom-right-radius: var(--radius-md) !important;
-    }
-    .dark #spatchat-chatbot .flex-wrap.user {
-        background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) !important;
     }
     #spatchat-chatbot .message-row.panel.user-row {
         align-self: stretch !important;
@@ -2565,7 +3082,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         margin-left: auto !important;
         margin-right: 0 !important;
         align-self: flex-end !important;
-        background: color-mix(in srgb, var(--background-fill-secondary) 78%, white 22%) !important;
+        background: var(--spatchat-accent-soft) !important;
+        color: var(--spatchat-text) !important;
         border: none !important;
         box-shadow: none !important;
         border-radius: var(--radius-md) !important;
@@ -2635,54 +3153,55 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-chatbot .message-row.panel.user-row .flex-wrap.user p:empty {
         display: none !important;
     }
-    .dark #spatchat-chatbot .message-row.panel.user-row .user {
-        background: color-mix(in srgb, var(--background-fill-secondary) 86%, white 14%) !important;
-    }
     #spatchat-chatbot .spatchat-status {
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        color: var(--body-text-color-subdued);
+        color: var(--spatchat-text-secondary);
         font-weight: 500;
     }
-    #spatchat-chatbot .spatchat-status-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: #5b86c5;
-        animation: spatchat-pulse 1.2s ease-in-out infinite;
-    }
     #spatchat-chatbot .spatchat-status-time {
-        color: var(--body-text-color-subdued);
+        color: var(--spatchat-text-secondary);
         font-size: 0.92em;
     }
     #spatchat-status {
         min-height: 24px;
         margin: 4px 0 8px 0 !important;
-        color: var(--body-text-color-subdued);
+        color: var(--spatchat-text-secondary);
         font-size: 14px;
     }
     #spatchat-status .spatchat-status {
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        color: var(--body-text-color-subdued);
+        color: var(--spatchat-text-secondary);
         font-weight: 500;
     }
-    #spatchat-status .spatchat-status-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: #5b86c5;
-        animation: spatchat-pulse 1.2s ease-in-out infinite;
-    }
     #spatchat-status .spatchat-status-time {
-        color: var(--body-text-color-subdued);
+        color: var(--spatchat-text-secondary);
         font-size: 0.92em;
     }
-    @keyframes spatchat-pulse {
-        0%, 100% { opacity: 0.35; }
-        50% { opacity: 1; }
+    .spatchat-typing-dots {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+    }
+    .spatchat-typing-dots span {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--spatchat-accent);
+        animation: spatchat-typing-bounce 1.2s ease-in-out infinite;
+    }
+    .spatchat-typing-dots span:nth-child(2) {
+        animation-delay: 0.15s;
+    }
+    .spatchat-typing-dots span:nth-child(3) {
+        animation-delay: 0.3s;
+    }
+    @keyframes spatchat-typing-bounce {
+        0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+        30% { transform: translateY(-3px); opacity: 1; }
     }
     #spatchat-splitter {
         min-width: 10px;
@@ -2692,7 +3211,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         position: relative;
         padding: 0 !important;
         margin: 0 !important;
-        min-height: 86vh;
+        height: 100%;
+        min-height: 0;
         align-self: stretch !important;
         background: transparent !important;
         overflow: visible !important;
@@ -2701,7 +3221,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-splitter .gradio-html,
     #spatchat-splitter .gradio-html > div {
         height: 100%;
-        min-height: 86vh;
+        min-height: 0;
         padding: 0 !important;
         margin: 0 !important;
         background: transparent !important;
@@ -2724,14 +3244,14 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         left: 50%;
         width: 1px;
         transform: translateX(-50%);
-        background: rgba(120, 130, 145, 0.55);
+        background: var(--spatchat-border);
         border-radius: 999px;
         transition: background 120ms ease, width 120ms ease;
     }
     #spatchat-splitter:hover .spatchat-splitter-handle::before,
     body.spatchat-resizing #spatchat-splitter .spatchat-splitter-handle::before {
         width: 2px;
-        background: #5b86c5;
+        background: var(--spatchat-accent);
     }
     body.spatchat-resizing,
     body.spatchat-resizing * {
@@ -2742,12 +3262,33 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         min-width: 0 !important;
         flex: 1 1 auto !important;
         width: auto !important;
+        height: 100%;
         position: relative;
         overflow: visible;
     }
+    #spatchat-mapcol.spatchat-map-dragover {
+        outline: 3px dashed var(--spatchat-accent);
+        outline-offset: -3px;
+        border-radius: var(--radius-lg);
+    }
+    #spatchat-mapcol.spatchat-map-dragover::after {
+        content: "Drop CSV to upload";
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(31, 122, 79, 0.14);
+        color: var(--spatchat-accent-hover);
+        font-size: 13px;
+        font-weight: 600;
+        pointer-events: none;
+        z-index: 500;
+        border-radius: var(--radius-lg);
+    }
     #spatchat-map {
-        min-height: calc(86vh + 10px);
-        height: calc(86vh + 10px);
+        min-height: 0;
+        height: 100%;
         overflow: visible;
         width: 100%;
         padding-bottom: 10px;
@@ -2759,7 +3300,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-map iframe {
         width: 100% !important;
         height: 100% !important;
-        min-height: calc(86vh + 10px);
+        min-height: 0;
         border: none;
     }
     body.spatchat-resizing #spatchat-map iframe {
@@ -3058,6 +3599,29 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         font-size: 12px;
         color: rgba(226, 233, 245, 0.72);
     }
+    #spatchat-x-col,
+    #spatchat-y-col,
+    #spatchat-crs {
+        background: var(--spatchat-surface) !important;
+        border: 1px solid var(--spatchat-border) !important;
+        border-radius: var(--radius-md) !important;
+        padding: 8px 10px !important;
+        margin-top: 8px !important;
+        box-shadow: var(--spatchat-shadow);
+    }
+    #spatchat-confirm {
+        margin-top: 8px !important;
+        background: var(--spatchat-accent) !important;
+        color: #ffffff !important;
+        border: none !important;
+        transition: background 0.15s ease, transform 0.1s ease !important;
+    }
+    #spatchat-confirm:hover {
+        background: var(--spatchat-accent-hover) !important;
+    }
+    #spatchat-confirm:active {
+        transform: scale(0.98) !important;
+    }
     #spatchat-download {
         display: flex;
         justify-content: center;
@@ -3072,11 +3636,52 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         justify-content: center !important;
         gap: 8px;
         text-align: center;
+        background: var(--spatchat-accent) !important;
+        color: #ffffff !important;
+        border: none !important;
+        transition: background 0.15s ease, transform 0.1s ease !important;
+    }
+    #spatchat-download button:hover {
+        background: var(--spatchat-accent-hover) !important;
+    }
+    #spatchat-download button:active {
+        transform: scale(0.98) !important;
+    }
+    footer {
+        display: none !important;
+    }
+    #spatchat-header-row {
+        align-items: center !important;
+        justify-content: space-between !important;
+        flex-wrap: nowrap !important;
+        gap: 16px !important;
+        background: var(--spatchat-accent-soft) !important;
+        border-radius: var(--radius-lg, 12px) !important;
+        padding: 6px 18px !important;
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 1000 !important;
+    }
+    #logo-img,
+    #logo-img > div,
+    #logo-img button {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        justify-content: flex-start !important;
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
     }
     #logo-img img {
-        height: 90px;
-        margin: 10px 50px 10px 10px;
+        height: 32px;
+        margin: 6px 0;
         border-radius: 6px;
+    }
+    #spatchat-navbar {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
     }
     body.spatchat-resizing,
     body.spatchat-resizing * {
@@ -3120,28 +3725,312 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             height: 100%;
         }
     }
+    #spatchat-share-btn {
+        transition: background 0.15s ease, transform 0.1s ease;
+    }
+    #spatchat-share-btn:hover {
+        background: #17603d !important;
+    }
+    #spatchat-share-btn:active {
+        transform: scale(0.96);
+    }
+    .spatchat-map-empty-hint {
+        position: absolute !important;
+        inset: 0 !important;
+        display: flex !important;
+        align-items: flex-end !important;
+        justify-content: center !important;
+        padding-bottom: 8% !important;
+        pointer-events: none !important;
+        z-index: 500 !important;
+    }
+    .spatchat-map-empty-hint-card {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        gap: 4px !important;
+        padding: 8px 14px !important;
+        border-radius: 10px !important;
+        background: #ffffff !important;
+        border: 1px solid rgba(16, 36, 26, 0.12) !important;
+        color: #10241a !important;
+        font-size: 12px !important;
+        font-weight: 600 !important;
+        text-align: center !important;
+        box-shadow: 0 8px 24px rgba(16, 36, 26, 0.16) !important;
+    }
+    .spatchat-map-empty-hint-card * {
+        color: inherit !important;
+    }
+    .spatchat-map-empty-hint-icon {
+        font-size: 16px !important;
+    }
+    .spatchat-map-empty-hint-sub {
+        font-size: 10px !important;
+        font-weight: 500 !important;
+        color: #5c6b63 !important;
+    }
     </style>
     """)
-    gr.Markdown("## 🏠 Spatchat: Animal Movement and Home Range Analysis {move}  🦊🦉🐢")
     gr.HTML("""
-    <div style="margin-top: -10px; margin-bottom: 15px;">
-      <input type="text" value="https://spatchat.org/browse/?room=move" id="shareLink" readonly style="width: 50%; padding: 5px; background-color: #f8f8f8; color: #222; font-weight: 500; border: 1px solid #ccc; border-radius: 4px;">
-      <button onclick="navigator.clipboard.writeText(document.getElementById('shareLink').value)" style="padding: 5px 10px; background-color: #007BFF; color: white; border: none; border-radius: 4px; cursor: pointer;">
-        📋 Copy Share Link
+    <style>
+    /* ---- Tabs (Map / Plots / Datasheet) ---- */
+    #spatchat-mapcol { flex: 1 1 0 !important; width: 0 !important; min-width: 0 !important; overflow: hidden !important; }
+    #spatchat-tabs { height: 100%; width: 100%; display: flex; flex-direction: column; background: transparent !important; }
+    #spatchat-tabs > .tab-wrapper, #spatchat-tabs > .tab-container { flex: 0 0 auto; }
+    #spatchat-tabs > div[role="tabpanel"], #spatchat-tabs .tabitem {
+        flex: 1 1 auto; min-height: 0; height: calc(100% - 44px); overflow: auto;
+        background: var(--spatchat-surface) !important; border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+        padding: 8px !important;
+    }
+    #spatchat-tabs button[role="tab"].selected { color: var(--spatchat-accent) !important; border-color: var(--spatchat-accent) !important; }
+    #spatchat-datasheet { height: 100%; }
+    #spatchat-tabs .tabitem { padding: 0 !important; margin-top: 4px; }
+    #spatchat-tabs .tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane) { background: transparent !important; overflow: hidden !important; }
+    #spatchat-tabs .tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane) > .column,
+    #spatchat-tabs .tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane) #spatchat-map { height: 100% !important; width: 100% !important; padding-bottom: 0 !important; }
+    #spatchat-tabs div.tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane):not(#x) { padding: 0 !important; }
+    #spatchat-tabs #spatchat-map .html-container { padding: 0 !important; height: 100% !important; }
+    #spatchat-tabs #spatchat-map .prose, #spatchat-tabs #spatchat-map .prose > div:not(.spatchat-map-empty-hint), #spatchat-tabs #spatchat-map .prose > div:not(.spatchat-map-empty-hint) > div,
+    #spatchat-tabs #spatchat-map iframe { height: 100% !important; width: 100% !important; }
+    #spatchat-plots-pane, #spatchat-data-pane { padding: 8px !important; }
+    /* ---- Plots tab: dock the figure viewer instead of a floating window ---- */
+    #spatchat-figure-layer, #spatchat-figure-layer > div, #spatchat-figure-layer .spatchat-figure-root {
+        width: 100% !important; height: 100% !important; overflow: visible !important;
+    }
+    #spatchat-figure-layer .spatchat-figure-launcher,
+    #spatchat-figure-layer .spatchat-figure-modal-backdrop,
+    #spatchat-figure-layer .spatchat-figure-resize-handle,
+    #spatchat-figure-layer .spatchat-figure-modal-btn-close { display: none !important; }
+    #spatchat-figure-layer .spatchat-figure-modal {
+        position: static !important; display: flex !important; width: 100% !important; height: 100% !important;
+        max-width: none !important; max-height: none !important; box-shadow: none !important;
+        border-radius: var(--radius-lg) !important;
+    }
+    #spatchat-figure-layer .spatchat-figure-modal-head { cursor: default !important; }
+    #spatchat-figure-layer .spatchat-figure-card-image { max-width: 100% !important; height: auto !important; }
+    #spatchat-tabs, #spatchat-tabs .tabitem, #spatchat-plots-pane, #spatchat-plots-pane * { min-width: 0 !important; }
+    #spatchat-tabs, #spatchat-tabs .tabitem, #spatchat-plots-pane, #spatchat-plots-pane * { max-width: 100% !important; }
+    #spatchat-tabs .tabitem { overflow: auto !important; align-items: flex-start; }
+    #spatchat-figure-layer, #spatchat-figure-layer > div, #spatchat-figure-layer .spatchat-figure-root,
+    #spatchat-figure-layer .spatchat-figure-modal { height: auto !important; }
+    #spatchat-figure-layer .spatchat-figure-modal-body { overflow: auto; }
+    #spatchat-figure-layer .spatchat-figure-modal { background: var(--spatchat-surface-alt) !important; border: 1px solid var(--spatchat-border) !important; color: var(--spatchat-text) !important; }
+    #spatchat-figure-layer .spatchat-figure-modal-head { background: var(--spatchat-accent-soft) !important; border-bottom: 1px solid var(--spatchat-border) !important; }
+    #spatchat-figure-layer .spatchat-figure-modal-title, #spatchat-figure-layer .spatchat-figure-modal-count,
+    #spatchat-figure-layer .spatchat-figure-card-title, #spatchat-figure-layer .spatchat-figure-card-meta { color: var(--spatchat-text) !important; }
+    #spatchat-figure-layer .spatchat-figure-card { background: var(--spatchat-surface) !important; }
+    /* ---- Professional polish ---- */
+    :root { --spatchat-font: "Inter", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif; }
+    html, body, gradio-app, .gradio-container, .gradio-container * { font-family: var(--spatchat-font) !important; }
+    .gradio-container code, .gradio-container pre, .gradio-container pre * { font-family: ui-monospace, "Cascadia Code", Consolas, monospace !important; }
+    #spatchat-header-row { background: var(--spatchat-surface) !important; border: 1px solid var(--spatchat-border) !important;
+        border-radius: 14px !important; padding: 6px 18px !important; box-shadow: var(--spatchat-shadow); align-items: center !important; }
+    #spatchat-navbar a { font-weight: 500 !important; font-size: 14px !important; padding: 6px 2px; border-bottom: 2px solid transparent; transition: border-color .15s, color .15s; }
+    #spatchat-navbar a:hover { border-bottom-color: var(--spatchat-accent); color: var(--spatchat-accent) !important; }
+    .spatchat-title-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 22px 4px 14px; }
+    .spatchat-title { margin: 0 !important; font-size: 26px !important; font-weight: 700 !important; letter-spacing: -0.02em; color: var(--spatchat-text) !important; line-height: 1.2; }
+    .spatchat-subtitle { margin: 4px 0 0 !important; font-size: 14px !important; color: var(--spatchat-text-secondary) !important; }
+    #spatchat-share-btn { flex: 0 0 auto; padding: 8px 18px; font-size: 13px; font-weight: 600; background: transparent; color: var(--spatchat-accent);
+        border: 1px solid var(--spatchat-accent); border-radius: 8px; cursor: pointer; transition: background .15s, color .15s; }
+    #spatchat-share-btn:hover { background: var(--spatchat-accent); color: #fff; }
+    #spatchat-tabs button[role="tab"] { font-size: 14px !important; font-weight: 600 !important; padding: 8px 18px !important; color: var(--spatchat-text-secondary) !important; }
+    #spatchat-tabs button[role="tab"].selected { color: var(--spatchat-accent) !important; }
+    #spatchat-tabs .tabitem { border: 1px solid var(--spatchat-border) !important; box-shadow: var(--spatchat-shadow); border-radius: 12px !important; }
+    #spatchat-chatbot { box-shadow: var(--spatchat-shadow) !important; background: var(--spatchat-surface) !important; }
+    #spatchat-chatbot .panel-wrap, #spatchat-chatbot .wrap, #spatchat-chatbot .bubble-wrap, #spatchat-chatbot .message-wrap { background: var(--spatchat-surface) !important; }
+    #spatchat-input-row { background: var(--spatchat-surface) !important; box-shadow: var(--spatchat-shadow); }
+    #spatchat-input-row:focus-within { border-color: var(--spatchat-accent) !important; box-shadow: 0 0 0 3px var(--spatchat-accent-soft); }
+    #spatchat-sample-btn { border: 1px solid var(--spatchat-border) !important; border-radius: 8px !important; background: var(--spatchat-surface) !important;
+        align-self: stretch !important; padding: 8px 12px !important; font-size: 13px !important; }
+    #spatchat-download, #spatchat-confirm { border-radius: 8px !important; font-weight: 600 !important; }
+    #spatchat-download { background: var(--spatchat-accent) !important; color: #fff !important; border: none !important; }
+    #spatchat-download:hover { background: var(--spatchat-accent-hover) !important; }
+    #spatchat-datasheet table { font-size: 13px; }
+    #spatchat-datasheet th { background: var(--spatchat-surface-alt) !important; font-weight: 600 !important; }
+    /* ---- Round chatbot ---- */
+    #spatchat-chatbot, #spatchat-chatbot > div { border-radius: 24px !important; }
+    #spatchat-chatbot { border: 1px solid var(--spatchat-border) !important; }
+    #spatchat-input-row {
+        border: 1px solid var(--spatchat-border) !important; border-radius: 999px !important;
+        margin-top: 8px !important; padding: 4px 10px !important;
+    }
+
+    /* ================= ChatGPT-style chat ================= */
+    #spatchat-sidebar { gap: 0 !important; flex: 0 0 440px !important; width: 440px; }
+    #spatchat-chatbot, #spatchat-chatbot > div, #spatchat-chatbot .wrapper, #spatchat-chatbot .panel-wrap,
+    #spatchat-chatbot .bubble-wrap, #spatchat-chatbot .message-wrap {
+        background: transparent !important; border: none !important; box-shadow: none !important; border-radius: 0 !important;
+    }
+    #spatchat-chatbot { flex: 1 1 auto !important; height: auto !important; min-height: 0 !important; padding: 0 !important; }
+    #spatchat-chatbot .message-wrap { padding: 4px 4px 12px !important; gap: 18px !important; }
+    #spatchat-chatbot .message-row { margin: 0 !important; padding: 0 !important; }
+    #spatchat-chatbot .message, #spatchat-chatbot .message * { font-size: 15px; line-height: 1.65; }
+    #spatchat-chatbot .message { max-width: 100% !important; padding: 0 !important; border: none !important; box-shadow: none !important; }
+    /* assistant: plain text on the page, no box */
+    #spatchat-chatbot .bot, #spatchat-chatbot .bot.message, #spatchat-chatbot .message.bot {
+        background: transparent !important; border: none !important; padding: 0 !important; width: 100% !important;
+    }
+    /* user: soft right-aligned bubble */
+    #spatchat-chatbot .message-row.user-row, #spatchat-chatbot .user-row { justify-content: flex-end !important; }
+    #spatchat-chatbot .user, #spatchat-chatbot .user.message, #spatchat-chatbot .message.user {
+        background: var(--spatchat-surface-alt) !important; color: var(--spatchat-text) !important;
+        border-radius: 20px 20px 6px 20px !important; padding: 10px 16px !important; width: fit-content !important; max-width: 85% !important;
+        margin-left: auto !important;
+    }
+    #spatchat-chatbot .message p { margin: 0 0 10px !important; }
+    #spatchat-chatbot .message p:last-child { margin-bottom: 0 !important; }
+    #spatchat-chatbot .message ul, #spatchat-chatbot .message ol { margin: 6px 0 10px 4px !important; padding-left: 20px !important; }
+    #spatchat-chatbot .message li { margin: 3px 0 !important; }
+    #spatchat-chatbot .message code { padding: 1px 6px !important; border-radius: 6px !important; font-size: 13px !important; }
+    #spatchat-chatbot .message pre { border-radius: 10px !important; padding: 12px 14px !important; border: 1px solid var(--spatchat-border) !important; }
+    #spatchat-chatbot .icon-button-wrapper { opacity: 0.6; }
+    #spatchat-status { min-height: 0 !important; padding: 0 6px !important; color: var(--spatchat-text-secondary) !important; font-size: 13px !important; }
+
+    /* suggestion chips */
+    #spatchat-chips { display: flex !important; flex-wrap: wrap !important; gap: 8px !important; padding: 8px 2px 10px !important; background: transparent !important; border: none !important; }
+    #spatchat-chips > * { flex: 0 0 auto !important; width: auto !important; min-width: 0 !important; }
+    .spatchat-chip, #spatchat-sample-btn.spatchat-chip {
+        width: auto !important; min-width: 0 !important; flex: 0 0 auto !important; padding: 6px 14px !important; margin: 0 !important;
+        font-size: 13px !important; font-weight: 500 !important; line-height: 1.3 !important; border-radius: 999px !important;
+        background: var(--spatchat-surface) !important; color: var(--spatchat-text) !important; border: 1px solid var(--spatchat-border) !important;
+        box-shadow: none !important; align-self: auto !important; transition: background .15s, border-color .15s, color .15s;
+    }
+    .spatchat-chip:hover { background: var(--spatchat-accent-soft) !important; border-color: var(--spatchat-accent) !important; color: var(--spatchat-accent) !important; }
+
+    /* composer */
+    #spatchat-input-row {
+        background: var(--spatchat-surface) !important; border: 1px solid var(--spatchat-border) !important; border-radius: 28px !important;
+        padding: 6px 8px 6px 8px !important; margin: 0 0 10px !important; box-shadow: 0 2px 10px rgba(16,36,26,.10) !important;
+        min-height: 54px; align-items: center !important;
+    }
+    #spatchat-input-row:focus-within { border-color: var(--spatchat-accent) !important; box-shadow: 0 0 0 3px var(--spatchat-accent-soft), 0 2px 10px rgba(16,36,26,.10) !important; }
+    #spatchat-user-input textarea, #spatchat-user-input input { font-size: 15px !important; padding: 10px 6px !important; }
+    #spatchat-file-input { width: 36px !important; height: 36px !important; min-width: 36px !important; flex: 0 0 36px !important; background: var(--spatchat-surface-alt) !important; color: var(--spatchat-text) !important; font-size: 22px !important; }
+    #spatchat-file-input:hover { background: var(--spatchat-accent-soft) !important; color: var(--spatchat-accent) !important; }
+    #spatchat-send-btn {
+        flex: 0 0 38px !important; width: 38px !important; min-width: 38px !important; height: 38px !important; padding: 0 !important; margin: 0 !important;
+        border-radius: 50% !important; border: none !important; background: var(--spatchat-accent) !important; color: #fff !important;
+        font-size: 18px !important; font-weight: 700 !important; line-height: 1 !important; display: flex; align-items: center; justify-content: center;
+    }
+    #spatchat-send-btn:hover { background: var(--spatchat-accent-hover) !important; }
+
+    /* ================= titles / header actions ================= */
+    .spatchat-title-actions { display: flex; gap: 8px; align-items: center; }
+    #spatchat-theme-btn { padding: 8px 16px; font-size: 13px; font-weight: 600; background: transparent; color: var(--spatchat-text-secondary);
+        border: 1px solid var(--spatchat-border); border-radius: 8px; cursor: pointer; transition: background .15s, color .15s; }
+    #spatchat-theme-btn:hover { background: var(--spatchat-surface-alt); color: var(--spatchat-text); }
+    .spatchat-theme-dark { display: none; }
+    body.spatchat-dark .spatchat-theme-light { display: none; }
+    body.spatchat-dark .spatchat-theme-dark { display: inline; }
+
+    /* ================= dataset selector ================= */
+    #spatchat-dataset-select { flex: 0 0 auto !important; margin-bottom: 8px; background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; }
+    #spatchat-dataset-select label > span, #spatchat-dataset-select .label-wrap span { font-size: 12px !important; font-weight: 600 !important; text-transform: uppercase; letter-spacing: .04em; color: var(--spatchat-text-secondary) !important; }
+    #spatchat-dataset-select input { font-size: 14px !important; font-weight: 600 !important; }
+    #spatchat-mapcol { flex-wrap: nowrap !important; flex-direction: column !important; }
+    #spatchat-tabs { flex: 1 1 0 !important; min-height: 0 !important; }
+    #spatchat-dataset-select { width: 100% !important; min-width: 0 !important; }
+    #spatchat-dataset-select .wrap, #spatchat-dataset-select input { background: var(--spatchat-surface) !important; border-radius: 10px !important; }
+    #spatchat-dataset-select input { border: 1px solid var(--spatchat-border) !important; padding: 8px 12px !important; }
+
+    /* ================= empty states ================= */
+    .spatchat-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+        gap: 8px; min-height: 360px; padding: 32px 24px; color: var(--spatchat-text-subtle); }
+    .spatchat-empty-state svg { color: var(--spatchat-text-subtle); opacity: .8; }
+    .spatchat-empty-title { font-size: 16px; font-weight: 600; color: var(--spatchat-text); }
+    .spatchat-empty-text { font-size: 14px; max-width: 360px; line-height: 1.55; color: var(--spatchat-text-secondary); }
+
+
+    /* ================= plot gallery + lightbox ================= */
+    .spatchat-gallery { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+    .spatchat-gallery-bar { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; font-weight: 600; color: var(--spatchat-text); padding: 2px 2px 0; }
+    .spatchat-gallery-hint { font-weight: 400; color: var(--spatchat-text-secondary); font-size: 12px; }
+    .spatchat-gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+    .spatchat-thumb { position: relative; display: flex !important; flex-direction: column; text-align: left !important; align-items: stretch !important; padding: 0 !important; cursor: zoom-in; overflow: hidden;
+        background: var(--spatchat-surface) !important; color: var(--spatchat-text) !important; border: 1px solid var(--spatchat-border); border-radius: 12px;
+        box-shadow: var(--spatchat-shadow); transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease; font: inherit; }
+    .spatchat-thumb:hover { transform: translateY(-2px); border-color: var(--spatchat-accent); box-shadow: 0 6px 18px rgba(16,36,26,.16); }
+    .spatchat-thumb-preview { display: block; height: 100px; background: #fff; overflow: hidden; border-bottom: 1px solid var(--spatchat-border); }
+    .spatchat-thumb-img { display: block; width: 100%; height: 100%; object-fit: contain; }
+    .spatchat-thumb-table { height: 100%; overflow: hidden; font-size: 9px; padding: 6px; color: #10241a; pointer-events: none; }
+    .spatchat-thumb-meta { display: flex; flex-direction: column; gap: 2px; padding: 7px 10px 9px; text-align: left; }
+    .spatchat-thumb-title { font-size: 12px; font-weight: 600; line-height: 1.3; }
+    .spatchat-thumb-sub { font-size: 10.5px; color: var(--spatchat-text-secondary); line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .spatchat-thumb-badge { position: absolute; top: 8px; left: 8px; background: var(--spatchat-accent); color: #fff; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+    .spatchat-thumb-zoom { position: absolute; top: 8px; right: 8px; background: rgba(16,36,26,.78); color: #fff; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; opacity: 0; transition: opacity .12s; }
+    .spatchat-thumb:hover .spatchat-thumb-zoom, .spatchat-thumb:focus-visible .spatchat-thumb-zoom { opacity: 1; }
+    #spatchat-lightbox { position: fixed; inset: 0; z-index: 100000; display: none; align-items: center; justify-content: center; }
+    #spatchat-lightbox.open { display: flex; }
+    #spatchat-lightbox .sl-backdrop { position: absolute; inset: 0; background: rgba(8,14,11,.62); backdrop-filter: blur(2px); }
+    #spatchat-lightbox .sl-panel { position: relative; display: flex; flex-direction: column; width: min(1100px, 92vw); height: min(86vh, 900px);
+        background: var(--spatchat-surface, #fff); color: var(--spatchat-text, #10241a); border-radius: 16px; overflow: hidden;
+        box-shadow: 0 24px 80px rgba(0,0,0,.45); border: 1px solid var(--spatchat-border, rgba(0,0,0,.1)); }
+    #spatchat-lightbox .sl-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px;
+        border-bottom: 1px solid var(--spatchat-border, rgba(0,0,0,.1)); background: var(--spatchat-surface-alt, #eef3ee); }
+    #spatchat-lightbox .sl-title { font-size: 15px; font-weight: 700; }
+    #spatchat-lightbox .sl-sub { font-size: 12px; color: var(--spatchat-text-secondary, #5c6b63); }
+    #spatchat-lightbox .sl-nav { display: flex; align-items: center; gap: 6px; }
+    #spatchat-lightbox .sl-count { font-size: 12px; color: var(--spatchat-text-secondary, #5c6b63); margin-right: 6px; }
+    #spatchat-lightbox .sl-nav button { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--spatchat-border, rgba(0,0,0,.12)); cursor: pointer;
+        background: var(--spatchat-surface, #fff); color: var(--spatchat-text, #10241a); font-size: 17px; line-height: 1; }
+    #spatchat-lightbox .sl-nav button:hover:not(:disabled) { background: var(--spatchat-accent-soft, #e3f2e8); border-color: var(--spatchat-accent, #1f7a4f); }
+    #spatchat-lightbox .sl-nav button:disabled { opacity: .35; cursor: default; }
+    #spatchat-lightbox .sl-body { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 16px; background: var(--spatchat-surface, #fff); }
+    #spatchat-lightbox .sl-body img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; background: #fff; border-radius: 8px; margin: auto; }
+    #spatchat-lightbox .sl-table { width: 100%; }
+    body.spatchat-lightbox-open { overflow: hidden; }
+    .spatchat-thumb-table table, #spatchat-lightbox .sl-table table { width: 100%; border-collapse: collapse; }
+    .spatchat-thumb-table th, #spatchat-lightbox .sl-table th { background: var(--spatchat-surface-alt) !important; color: var(--spatchat-text) !important; font-weight: 600; text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--spatchat-border); }
+    .spatchat-thumb-table td, #spatchat-lightbox .sl-table td { background: transparent !important; color: var(--spatchat-text) !important; padding: 4px 8px; border-bottom: 1px solid var(--spatchat-border); }
+    .spatchat-thumb-table { background: var(--spatchat-surface); }
+    /* ================= dark mode ================= */
+    .spatchat-dark {
+        --spatchat-connect-bg: #0e1512; --spatchat-surface: #16201b; --spatchat-surface-alt: #1e2a24;
+        --spatchat-border: rgba(255,255,255,0.12); --spatchat-text: #e8efe9; --spatchat-text-secondary: #a6b4ab; --spatchat-text-subtle: #7f8f85;
+        --spatchat-accent: #3fb27f; --spatchat-accent-hover: #5cc796; --spatchat-accent-soft: #1d3a2d;
+        --spatchat-shadow: 0 1px 3px rgba(0,0,0,.5), 0 1px 2px rgba(0,0,0,.4);
+    }
+    body.spatchat-dark #spatchat-navbar a { color: var(--spatchat-text) !important; }
+    body.spatchat-dark #spatchat-navbar a:hover { color: var(--spatchat-accent) !important; }
+    body.spatchat-dark #spatchat-input-row { box-shadow: 0 2px 12px rgba(0,0,0,.5) !important; }
+    body.spatchat-dark #spatchat-logo-img img, body.spatchat-dark #logo-img img { background: #fff; border-radius: 8px; padding: 2px 6px; }
+    body.spatchat-dark .spatchat-map-empty-hint-card { background: var(--spatchat-surface) !important; color: var(--spatchat-text) !important; border-color: var(--spatchat-border) !important; }
+    body.spatchat-dark #spatchat-datasheet, body.spatchat-dark #spatchat-datasheet * { color: var(--spatchat-text); }
+    body.spatchat-dark #spatchat-datasheet th { background: var(--spatchat-surface-alt) !important; }
+    body.spatchat-dark #spatchat-datasheet td { background: var(--spatchat-surface) !important; }
+    body.spatchat-dark #spatchat-figure-layer .spatchat-figure-card-image { background: #fff; border-radius: 8px; }
+    body.spatchat-dark .spatchat-figure-table th, body.spatchat-dark .spatchat-figure-table td { color: var(--spatchat-text) !important; }
+    body.spatchat-dark #spatchat-sidebar, body.spatchat-dark #spatchat-mapcol, body.spatchat-dark #spatchat-workarea, body.spatchat-dark #spatchat-splitter { background: var(--spatchat-connect-bg) !important; }
+    </style>
+    """)
+    with gr.Row(elem_id="spatchat-header-row"):
+        gr.Image(scale=0, min_width=0, **image_kwargs)
+        gr.HTML(elem_id="spatchat-navbar", scale=0, min_width=0, value="""
+        <nav style="display: flex; gap: 22px; align-items: center; font-size: 15px; font-weight: 600;">
+          <a href="https://spatchat.org/" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">Home</a>
+          <a href="https://spatchat.org/about" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">About</a>
+          <a href="https://spatchat.org/browse" target="_blank" rel="noopener" style="color: #1f7a4f; text-decoration: none;">Browse Rooms</a>
+          <a href="https://spatchat.org/join" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">Join</a>
+        </nav>
+        """)
+    gr.HTML("""
+    <div class="spatchat-title-row">
+      <div>
+        <h1 class="spatchat-title">Animal Movement and Home Range Analysis</h1>
+        <p class="spatchat-subtitle">Upload tracking data, estimate home ranges, and explore movement behavior through conversation.</p>
+      </div>
+      <div class="spatchat-title-actions">
+      <button id="spatchat-theme-btn" type="button" onclick="window.spatchatToggleTheme && window.spatchatToggleTheme()">
+        <span class="spatchat-theme-light">Dark mode</span><span class="spatchat-theme-dark">Light mode</span>
       </button>
-      <div style="margin-top: 10px; font-size: 14px;">
-        <b>Share:</b>
-        <a href="https://twitter.com/intent/tweet?text=Checkout+Spatchat!&url=https://spatchat.org/browse/?room=move" target="_blank">🐦 Twitter</a> |
-        <a href="https://www.facebook.com/sharer/sharer.php?u=https://spatchat.org/browse/?room=move" target="_blank">📘 Facebook</a>
+      <button id="spatchat-share-btn" onclick="
+        navigator.clipboard.writeText('https://spatchat.org/browse/?room=move');
+        this.textContent = 'Link copied';
+        setTimeout(() => { this.textContent = 'Share'; }, 1500);
+      ">Share</button>
       </div>
     </div>
-    """)
-    gr.Markdown("""
-        <div style="font-size: 14px;">
-        © 2025 Ho Yi Wan & Logan Hysen. All rights reserved.<br>
-        If you use Spatchat in research, please cite:<br>
-        <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>Spatchat: Animal Movement and Home Range Analysis.</i>
-        </div>
     """)
 
     with gr.Row(elem_id="spatchat-workarea"):
@@ -3149,7 +4038,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             chatbot_kwargs = {
                 "label": "Spatchat",
                 "show_label": False,
-                "layout": "panel",
+                "layout": "bubble",
                 "value": [{"role": "assistant", "content": "Hi, I'm Spatchat! This room helps you analyze home ranges and movement behavior from movement data.\n\nUpload a movement CSV to begin: it should include coordinates, and can also include timestamps and animal IDs for track-aware analyses.\nThis room can:\n- estimate home ranges with MCP, KDE, AKDE, LoCoH, and dBBMM\n- analyze movement patterns using displacement, step lengths, turning angles, and autocorrelation diagnostics\n- identify behavioral states with a hidden Markov model"}],
                 "elem_id": "spatchat-chatbot",
             }
@@ -3161,29 +4050,74 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                 chatbot_kwargs["feedback_options"] = None
             chatbot = gr.Chatbot(**chatbot_kwargs)
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
-            user_input = gr.Textbox(label="", show_label=False, placeholder="Ask Spatchat...", lines=1, elem_id="spatchat-user-input")
-            file_input = gr.File(label="Upload Movement CSV (.csv or .txt only)", file_types=[".csv", ".txt"], elem_id="spatchat-file-input")
+            with gr.Row(elem_id="spatchat-chips"):
+                sample_btn = gr.Button("Try sample data", elem_id="spatchat-sample-btn", size="sm", elem_classes=["spatchat-chip"], scale=0, min_width=0)
+                chip_buttons = [
+                    gr.Button(label, size="sm", elem_classes=["spatchat-chip"], scale=0, min_width=0)
+                    for label in _SUGGESTION_CHIPS
+                ]
+            with gr.Row(elem_id="spatchat-input-row"):
+                file_input = gr.UploadButton(
+                    "+",
+                    file_types=[".csv", ".txt"],
+                    elem_id="spatchat-file-input",
+                    scale=0,
+                    min_width=44,
+                )
+                user_input = gr.Textbox(label="", show_label=False, placeholder="Message Spatchat...", lines=1, elem_id="spatchat-user-input", scale=1)
+                send_btn = gr.Button("\u2191", elem_id="spatchat-send-btn", scale=0, min_width=40)
             x_col = gr.Dropdown(label="X column", choices=[], visible=False, elem_id="spatchat-x-col")
             y_col = gr.Dropdown(label="Y column", choices=[], visible=False, elem_id="spatchat-y-col")
             crs_text = gr.Text(label="CRS (e.g. '32633', '33N', or 'EPSG:32633')", visible=False, elem_id="spatchat-crs")
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False, elem_id="spatchat-confirm")
-            download_btn = gr.DownloadButton("⭳ Download Results", value=None, visible=False, elem_id="spatchat-download")
+            download_btn = gr.DownloadButton("Download results", value=None, visible=False, elem_id="spatchat-download")
         with gr.Column(scale=0, min_width=14, elem_id="spatchat-splitter"):
             gr.HTML("<div class='spatchat-splitter-handle' onmousedown='return window.spatchatBeginResize ? window.spatchatBeginResize(event) : false;' title='Drag to resize panels'></div>")
         with gr.Column(scale=5, min_width=0, elem_id="spatchat-mapcol"):
-            map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False, elem_id="spatchat-map")
-    figure_output = gr.HTML(value=_render_figure_viewer([]), elem_id="spatchat-figure-layer")
+            dataset_selector = gr.Dropdown(label="Dataset", show_label=False, container=False, choices=[], value=None, visible=False, interactive=True, elem_id="spatchat-dataset-select", scale=0)
+            with gr.Tabs(elem_id="spatchat-tabs") as main_tabs:
+                with gr.Tab("Map", id="map"):
+                    map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False, elem_id="spatchat-map")
+                with gr.Tab("Plots", id="plots", elem_id="spatchat-plots-pane"):
+                    figure_output = gr.HTML(value=_render_figure_viewer([]), elem_id="spatchat-figure-layer")
+                with gr.Tab("Datasheet", id="data", elem_id="spatchat-data-pane"):
+                    datasheet_empty = gr.HTML(value=_EMPTY_DATA_HTML, visible=True)
+                    datasheet = gr.Dataframe(label=f"Data (first {_DATASHEET_MAX_ROWS} rows)", interactive=False, wrap=False, visible=False, elem_id="spatchat-datasheet")
+    gr.HTML("""
+    <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(16,36,26,0.1); font-size: 11px; color: #5c6b63; text-align: center;">
+      © 2025 Ho Yi Wan &amp; Logan Hysen &middot; Cite: Wan, H.Y. &amp; Hysen, L. (2025). <i>Spatchat: Animal Movement and Home Range Analysis.</i>
+    </div>
+    """)
 
     demo.queue(max_size=16)
 
-    file_input.change(
+    file_input.upload(
         fn=_handle_upload_initial_ui,
         inputs=[file_input, chatbot, session_state, figure_state],
         outputs=[chatbot, status_output, x_col, y_col, crs_text, map_output, x_col, y_col, crs_text, confirm_btn, download_btn, session_state, figure_output, figure_state]
-    )
-    confirm_btn.click(fn=_confirm_and_hint_ui, inputs=[x_col, y_col, crs_text, chatbot, session_state], outputs=[map_output, chatbot, status_output, session_state])
-    user_input.submit(
-        fn=_handle_chat_ui,
+    ).then(_datasheet_update, inputs=session_state, outputs=[datasheet, datasheet_empty]).then(
+        lambda f, sid, lib, figs, mh: _register_dataset(f, sid, lib, figs, mh),
+        inputs=[file_input, session_state, library_state, figure_state, map_output],
+        outputs=[library_state, dataset_selector],
+    ).then(lambda: _select_tab("map"), inputs=None, outputs=main_tabs)
+    sample_btn.click(
+        fn=_load_sample_data_ui,
+        inputs=[chatbot, session_state, figure_state],
+        outputs=[chatbot, status_output, x_col, y_col, crs_text, map_output, x_col, y_col, crs_text, confirm_btn, download_btn, session_state, figure_output, figure_state]
+    ).then(_datasheet_update, inputs=session_state, outputs=[datasheet, datasheet_empty]).then(
+        lambda sid, lib, figs, mh: _register_dataset("Sample data", sid, lib, figs, mh),
+        inputs=[session_state, library_state, figure_state, map_output],
+        outputs=[library_state, dataset_selector],
+    ).then(lambda: _select_tab("map"), inputs=None, outputs=main_tabs)
+    confirm_btn.click(fn=_confirm_and_hint_ui, inputs=[x_col, y_col, crs_text, chatbot, session_state], outputs=[map_output, chatbot, status_output, session_state]).then(_datasheet_update, inputs=session_state, outputs=[datasheet, datasheet_empty]).then(
+        _sync_active_dataset,
+        inputs=[session_state, library_state, figure_state, map_output],
+        outputs=library_state,
+        show_progress="hidden",
+    ).then(lambda: _select_tab("map"), inputs=None, outputs=main_tabs)
+    gr.on(
+        triggers=[user_input.submit, send_btn.click],
+        fn=metered_chat(room="move", message_index=1, deny=_chat_denied)(_handle_chat_ui),
         inputs=[chatbot, user_input, session_state, figure_state],
         outputs=[chatbot, map_output, download_btn, status_output, figure_output, figure_state, session_state],
         show_progress="hidden",
@@ -3200,6 +4134,20 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             return [chatHistory, text, sessionState, figureState];
         }
         """,
+    ).then(_datasheet_update, inputs=session_state, outputs=[datasheet, datasheet_empty], show_progress="hidden").then(
+        _consume_next_tab, inputs=session_state, outputs=main_tabs, show_progress="hidden"
+    ).then(
+        _sync_active_dataset,
+        inputs=[session_state, library_state, figure_state, map_output],
+        outputs=library_state,
+        show_progress="hidden",
+    )
+    for _chip, _label in zip(chip_buttons, _SUGGESTION_CHIPS):
+        _chip.click(fn=None, js=_chip_js(_label))
+    dataset_selector.input(
+        _switch_dataset,
+        inputs=[dataset_selector, library_state, session_state, chatbot],
+        outputs=[chatbot, map_output, figure_output, figure_state, datasheet, datasheet_empty, main_tabs, library_state],
     )
     demo.unload(_cleanup_current_browser_session)
 
@@ -3208,7 +4156,7 @@ def _launch_demo(blocks: gr.Blocks) -> None:
     launch_kwargs = {
         "share": False,
         "head": _SPLITTER_HEAD,
-        "server_name": "0.0.0.0",
+        "server_name": os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         "server_port": int(os.environ.get("PORT", 7860))
     }
     try:
@@ -3218,6 +4166,8 @@ def _launch_demo(blocks: gr.Blocks) -> None:
         params = {}
 
     available = params.keys() if hasattr(params, "keys") else []
+    if "max_file_size" in available:
+        launch_kwargs["max_file_size"] = f"{MAX_UPLOAD_MB}mb"
     if "ssr_mode" in available:
         launch_kwargs["ssr_mode"] = False
 
