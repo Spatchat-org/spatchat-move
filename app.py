@@ -2675,18 +2675,23 @@ window.spatchatInitMapDropzone = function() {
 </script>
 """
 
+def _logo_html() -> str:
+    import base64
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_small.png")
+    try:
+        with open(path, "rb") as f:
+            src = "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        return '<span style="font-weight:700;color:#e8527a">Spatchat</span>'
+    return f'<img src="{src}" alt="Spatchat" draggable="false">'
+
+
+_LOGO_HTML = _logo_html()
+
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     session_state = gr.State(None)
     library_state = gr.State(_new_library())
     figure_state = gr.State([])
-    image_kwargs = {
-        "value": "logo_long1.png",
-        "show_label": False,
-        "type": "filepath",
-        "elem_id": "logo-img",
-    }
-    if _component_accepts_kw(gr.Image, "buttons"):
-        image_kwargs["buttons"] = []
     gr.HTML("""
     <style>
     :root {
@@ -4005,7 +4010,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     </style>
     """)
     with gr.Row(elem_id="spatchat-header-row"):
-        gr.Image(scale=0, min_width=0, **image_kwargs)
+        # A plain <img> rather than gr.Image, which adds a clickable widget with its own chrome.
+        gr.HTML(elem_id="logo-img", scale=0, min_width=0, value=_LOGO_HTML)
         gr.HTML(elem_id="spatchat-navbar", scale=0, min_width=0, value="""
         <nav style="display: flex; gap: 22px; align-items: center; font-size: 15px; font-weight: 600;">
           <a href="https://spatchat.org/" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">Home</a>
