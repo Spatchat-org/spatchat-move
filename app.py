@@ -2225,8 +2225,8 @@ window.spatchatToggleTheme = function() {
   const apply = () => {
     window.spatchatApplyTheme(saved === "dark" ? "dark" : "light");
     // Embedded in spatchat.org, which already has its own header.
-    try { if (window.self !== window.top) document.body.classList.add("spatchat-embedded"); }
-    catch (e) { document.body.classList.add("spatchat-embedded"); }
+    try { if (window.self !== window.top) { document.body.classList.add("spatchat-embedded"); document.documentElement.classList.add("spatchat-embedded"); } }
+    catch (e) { document.body.classList.add("spatchat-embedded"); document.documentElement.classList.add("spatchat-embedded"); }
   };
   if (document.body) apply(); else document.addEventListener("DOMContentLoaded", apply, { once: true });
 })();
@@ -4012,6 +4012,14 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     body.spatchat-dark #spatchat-figure-layer .spatchat-figure-card-image { background: #fff; border-radius: 8px; }
     body.spatchat-dark .spatchat-figure-table th, body.spatchat-dark .spatchat-figure-table td { color: var(--spatchat-text) !important; }
     body.spatchat-embedded #spatchat-header-row { display: none !important; }
+    html.spatchat-embedded:not(.spatchat-dark), body.spatchat-embedded:not(.spatchat-dark),
+    body.spatchat-embedded:not(.spatchat-dark) gradio-app,
+    body.spatchat-embedded:not(.spatchat-dark) .gradio-container,
+    body.spatchat-embedded:not(.spatchat-dark) .gradio-container .main,
+    body.spatchat-embedded:not(.spatchat-dark) #spatchat-workarea,
+    body.spatchat-embedded:not(.spatchat-dark) #spatchat-sidebar,
+    body.spatchat-embedded:not(.spatchat-dark) #spatchat-mapcol,
+    body.spatchat-embedded:not(.spatchat-dark) #spatchat-splitter { background: transparent !important; }
     body.spatchat-dark #spatchat-sidebar, body.spatchat-dark #spatchat-mapcol, body.spatchat-dark #spatchat-workarea, body.spatchat-dark #spatchat-splitter { background: var(--spatchat-connect-bg) !important; }
     </style>
     """)
