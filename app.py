@@ -4011,15 +4011,82 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     body.spatchat-dark #spatchat-datasheet td { background: var(--spatchat-surface) !important; }
     body.spatchat-dark #spatchat-figure-layer .spatchat-figure-card-image { background: #fff; border-radius: 8px; }
     body.spatchat-dark .spatchat-figure-table th, body.spatchat-dark .spatchat-figure-table td { color: var(--spatchat-text) !important; }
+    /* ================= Enterprise polish (keep last) ================= */
+    :root {
+        --spatchat-connect-bg: #f3f5f8;
+        --spatchat-surface: #ffffff;
+        --spatchat-surface-alt: #f1f4f8;
+        --spatchat-border: rgba(15, 23, 42, 0.09);
+        --spatchat-text: #0f172a;
+        --spatchat-text-secondary: #475569;
+        --spatchat-text-subtle: #94a3b8;
+        --spatchat-accent: #0f766e;
+        --spatchat-accent-hover: #115e59;
+        --spatchat-accent-soft: #e6f4f1;
+        --spatchat-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+        --spatchat-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
+    }
+    .gradio-container { padding-top: 10px !important; }
+    /* blocks that only carry a <style> tag would otherwise add an empty row plus a gap each */
+    .gradio-container .contain > .column > .block:has(style) { display: none !important; }
+    #spatchat-header-row { border-radius: 12px !important; padding: 2px 16px !important; box-shadow: var(--spatchat-shadow) !important; }
+    #spatchat-navbar nav { gap: 6px !important; }
+    #spatchat-navbar a { color: var(--spatchat-text-secondary) !important; font-weight: 500 !important; padding: 6px 12px !important; border-radius: 8px; border-bottom: none !important; }
+    #spatchat-navbar a:hover { background: var(--spatchat-surface-alt); color: var(--spatchat-text) !important; }
+    #spatchat-navbar a[href$="/browse"] { color: var(--spatchat-accent) !important; background: var(--spatchat-accent-soft); }
+
+    .spatchat-title-row { margin: 12px 2px 16px !important; align-items: center !important; }
+    .spatchat-title { font-size: 22px !important; font-weight: 650 !important; letter-spacing: -0.015em !important; }
+    .spatchat-subtitle { font-size: 13.5px !important; color: var(--spatchat-text-secondary) !important; margin-top: 3px !important; }
+    #spatchat-theme-btn, #spatchat-share-btn { height: 34px; padding: 0 14px !important; font-size: 13px !important; font-weight: 600 !important; border-radius: 8px !important; }
+    #spatchat-theme-btn { background: var(--spatchat-surface) !important; border: 1px solid var(--spatchat-border) !important; color: var(--spatchat-text) !important; box-shadow: var(--spatchat-shadow); }
+    #spatchat-theme-btn:hover { background: var(--spatchat-surface-alt) !important; }
+    #spatchat-share-btn { background: var(--spatchat-accent) !important; border: 1px solid var(--spatchat-accent) !important; color: #fff !important; }
+    #spatchat-share-btn:hover { background: var(--spatchat-accent-hover) !important; border-color: var(--spatchat-accent-hover) !important; color: #fff !important; }
+
+    #spatchat-workarea { background: transparent !important; height: calc(100vh - 150px) !important; min-height: 560px; padding-bottom: 12px !important; }
+    #spatchat-workarea > .gradio-row { gap: 8px !important; }
+    #spatchat-sidebar, #spatchat-mapcol {
+        background: var(--spatchat-surface) !important; border: 1px solid var(--spatchat-border) !important;
+        border-radius: 16px !important; box-shadow: var(--spatchat-card-shadow) !important;
+    }
+    #spatchat-sidebar { padding: 18px 18px 8px !important; }
+    #spatchat-mapcol { padding: 12px 16px 16px !important; overflow: hidden !important; }
+    #spatchat-splitter { background: transparent !important; }
+
+    #spatchat-chatbot .message, #spatchat-chatbot .message * { font-size: 14.5px; line-height: 1.6; }
+    #spatchat-chatbot .user, #spatchat-chatbot .user.message, #spatchat-chatbot .message.user {
+        background: var(--spatchat-accent-soft) !important; border-radius: 14px 14px 4px 14px !important; padding: 9px 14px !important;
+    }
+    #spatchat-chatbot .message.panel-full-width, #spatchat-chatbot .bot .panel-full-width { background: transparent !important; }
+    #spatchat-tabs > .tab-wrapper::after { display: none !important; }
+    #spatchat-chips { gap: 6px !important; padding: 10px 0 12px !important; }
+    .spatchat-chip, #spatchat-sample-btn.spatchat-chip {
+        border-radius: 8px !important; padding: 5px 11px !important; font-size: 12.5px !important; font-weight: 500 !important;
+        background: var(--spatchat-surface-alt) !important; border: 1px solid transparent !important; color: var(--spatchat-text-secondary) !important;
+    }
+    .spatchat-chip:hover { background: var(--spatchat-accent-soft) !important; border-color: transparent !important; color: var(--spatchat-accent) !important; }
+    #spatchat-input-row { border-radius: 12px !important; box-shadow: var(--spatchat-shadow) !important; min-height: 48px; margin-bottom: 12px !important; }
+    #spatchat-input-row:focus-within { border-color: var(--spatchat-accent) !important; box-shadow: 0 0 0 3px var(--spatchat-accent-soft) !important; }
+    #spatchat-send-btn { border-radius: 10px !important; flex: 0 0 36px !important; width: 36px !important; min-width: 36px !important; height: 36px !important; }
+    #spatchat-file-input { border-radius: 10px !important; }
+
+    #spatchat-tabs > .tab-wrapper, #spatchat-tabs > .tab-container { border-bottom: 1px solid var(--spatchat-border) !important; }
+    #spatchat-tabs button[role="tab"] { font-size: 13.5px !important; font-weight: 600 !important; padding: 8px 16px !important; border: none !important; border-bottom: 2px solid transparent !important; }
+    #spatchat-tabs button[role="tab"].selected { color: var(--spatchat-accent) !important; border-bottom-color: var(--spatchat-accent) !important; }
+    #spatchat-tabs .tabitem { border: none !important; box-shadow: none !important; margin-top: 12px !important; border-radius: 12px !important; }
+    #spatchat-tabs #spatchat-map { border-radius: 12px; overflow: hidden; border: 1px solid var(--spatchat-border); }
+    #spatchat-tabs div.tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane) { background: transparent !important; }
     body.spatchat-embedded #spatchat-header-row { display: none !important; }
+    body.spatchat-embedded .gradio-container .main { padding-top: 0 !important; }
+    body.spatchat-embedded .gradio-container { padding-top: 0 !important; }
+    body.spatchat-embedded .spatchat-title-row { margin-top: 6px !important; }
+    body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 135px) !important; min-height: 520px; }
     html.spatchat-embedded:not(.spatchat-dark), body.spatchat-embedded:not(.spatchat-dark),
     body.spatchat-embedded:not(.spatchat-dark) gradio-app,
     body.spatchat-embedded:not(.spatchat-dark) .gradio-container,
     body.spatchat-embedded:not(.spatchat-dark) .gradio-container .main,
-    body.spatchat-embedded:not(.spatchat-dark) #spatchat-workarea,
-    body.spatchat-embedded:not(.spatchat-dark) #spatchat-sidebar,
-    body.spatchat-embedded:not(.spatchat-dark) #spatchat-mapcol,
-    body.spatchat-embedded:not(.spatchat-dark) #spatchat-splitter { background: transparent !important; }
+    body.spatchat-embedded:not(.spatchat-dark) #spatchat-workarea, body.spatchat-embedded:not(.spatchat-dark) #spatchat-splitter { background: transparent !important; }
     body.spatchat-dark #spatchat-sidebar, body.spatchat-dark #spatchat-mapcol, body.spatchat-dark #spatchat-workarea, body.spatchat-dark #spatchat-splitter { background: var(--spatchat-connect-bg) !important; }
     </style>
     """)
