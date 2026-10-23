@@ -2222,7 +2222,12 @@ window.spatchatToggleTheme = function() {
 (function initSpatchatTheme() {
   let saved = null;
   try { saved = localStorage.getItem("spatchat-theme"); } catch (e) {}
-  const apply = () => window.spatchatApplyTheme(saved === "dark" ? "dark" : "light");
+  const apply = () => {
+    window.spatchatApplyTheme(saved === "dark" ? "dark" : "light");
+    // Embedded in spatchat.org, which already has its own header.
+    try { if (window.self !== window.top) document.body.classList.add("spatchat-embedded"); }
+    catch (e) { document.body.classList.add("spatchat-embedded"); }
+  };
   if (document.body) apply(); else document.addEventListener("DOMContentLoaded", apply, { once: true });
 })();
 
@@ -4006,6 +4011,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     body.spatchat-dark #spatchat-datasheet td { background: var(--spatchat-surface) !important; }
     body.spatchat-dark #spatchat-figure-layer .spatchat-figure-card-image { background: #fff; border-radius: 8px; }
     body.spatchat-dark .spatchat-figure-table th, body.spatchat-dark .spatchat-figure-table td { color: var(--spatchat-text) !important; }
+    body.spatchat-embedded #spatchat-header-row { display: none !important; }
     body.spatchat-dark #spatchat-sidebar, body.spatchat-dark #spatchat-mapcol, body.spatchat-dark #spatchat-workarea, body.spatchat-dark #spatchat-splitter { background: var(--spatchat-connect-bg) !important; }
     </style>
     """)
