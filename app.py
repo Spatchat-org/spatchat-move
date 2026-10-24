@@ -2225,6 +2225,7 @@ window.spatchatToggleTheme = function() {
   const apply = () => {
     window.spatchatApplyTheme(saved === "dark" ? "dark" : "light");
     // Embedded in spatchat.org, which already has its own header.
+    if (window.location.pathname.replace(/[/]+$/, "") !== "") document.body.classList.add("spatchat-gated");
     try { if (window.self !== window.top) { document.body.classList.add("spatchat-embedded"); document.documentElement.classList.add("spatchat-embedded"); } }
     catch (e) { document.body.classList.add("spatchat-embedded"); document.documentElement.classList.add("spatchat-embedded"); }
   };
@@ -4077,11 +4078,30 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-tabs .tabitem { border: none !important; box-shadow: none !important; margin-top: 12px !important; border-radius: 12px !important; }
     #spatchat-tabs #spatchat-map { border-radius: 12px; overflow: hidden; border: 1px solid var(--spatchat-border); }
     #spatchat-tabs div.tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane) { background: transparent !important; }
+
+    /* ---- single slim top bar: logo, room name, links, dark mode, share ---- */
+    #spatchat-topbar { display: flex; align-items: center; gap: 12px; background: var(--spatchat-surface); border: 1px solid var(--spatchat-border);
+      border-radius: 12px; padding: 6px 14px; margin: 4px 0 10px; box-shadow: var(--spatchat-shadow); }
+    #spatchat-topbar .sp-brand { display: flex; align-items: center; }
+    #spatchat-topbar .sp-brand img { height: 28px; width: auto; display: block; }
+    body.spatchat-dark #spatchat-topbar .sp-brand img { background: #fff; border-radius: 6px; padding: 2px 6px; }
+    #spatchat-topbar .sp-room { margin: 0 !important; font-size: 17px !important; font-weight: 650 !important; letter-spacing: -0.01em;
+      color: var(--spatchat-text) !important; line-height: 1.2; }
+    #spatchat-topbar .sp-spacer { flex: 1; }
+    #spatchat-topbar .sp-link { font-size: 13px; font-weight: 600; color: var(--spatchat-text-secondary); text-decoration: none; padding: 6px 10px; border-radius: 8px; }
+    #spatchat-topbar .sp-link:hover { background: var(--spatchat-surface-alt); color: var(--spatchat-text); }
+    #spatchat-topbar .sp-gated { display: none; }
+    body.spatchat-gated #spatchat-topbar .sp-gated { display: inline-block; }
+    #spatchat-topbar .spatchat-title-actions { display: flex; gap: 8px; align-items: center; }
+    body.spatchat-embedded #spatchat-topbar { background: transparent; border: none; box-shadow: none; padding-left: 2px; }
+    body.spatchat-embedded #spatchat-topbar .sp-brand, body.spatchat-embedded #spatchat-topbar .sp-link { display: none !important; }
+    body #spatchat-workarea { height: calc(100vh - 96px) !important; min-height: 520px; }
+    body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 84px) !important; }
+
     body.spatchat-embedded #spatchat-header-row { display: none !important; }
     body.spatchat-embedded .gradio-container .main { padding-top: 0 !important; }
     body.spatchat-embedded .gradio-container { padding-top: 0 !important; }
     body.spatchat-embedded .spatchat-title-row { margin-top: 6px !important; }
-    body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 135px) !important; min-height: 520px; }
     html.spatchat-embedded:not(.spatchat-dark), body.spatchat-embedded:not(.spatchat-dark),
     body.spatchat-embedded:not(.spatchat-dark) gradio-app,
     body.spatchat-embedded:not(.spatchat-dark) .gradio-container,
@@ -4090,32 +4110,22 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     body.spatchat-dark #spatchat-sidebar, body.spatchat-dark #spatchat-mapcol, body.spatchat-dark #spatchat-workarea, body.spatchat-dark #spatchat-splitter { background: var(--spatchat-connect-bg) !important; }
     </style>
     """)
-    with gr.Row(elem_id="spatchat-header-row"):
-        # A plain <img> rather than gr.Image, which adds a clickable widget with its own chrome.
-        gr.HTML(elem_id="logo-img", scale=0, min_width=0, value=_LOGO_HTML)
-        gr.HTML(elem_id="spatchat-navbar", scale=0, min_width=0, value="""
-        <nav style="display: flex; gap: 22px; align-items: center; font-size: 15px; font-weight: 600;">
-          <a href="https://spatchat.org/" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">Home</a>
-          <a href="https://spatchat.org/about" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">About</a>
-          <a href="https://spatchat.org/browse" target="_blank" rel="noopener" style="color: #1f7a4f; text-decoration: none;">Browse Rooms</a>
-          <a href="https://spatchat.org/join" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">Join</a>
-        </nav>
-        """)
-    gr.HTML("""
-    <div class="spatchat-title-row">
-      <div>
-        <h1 class="spatchat-title">Animal Movement and Home Range Analysis</h1>
-        <p class="spatchat-subtitle">Upload tracking data, estimate home ranges, and explore movement behavior through conversation.</p>
-      </div>
+    gr.HTML(f"""
+    <div id="spatchat-topbar">
+      <a class="sp-brand" href="https://spatchat.org/" target="_blank" rel="noopener" title="SpatChat home">{_LOGO_HTML}</a>
+      <h1 class="sp-room">Animal Movement and Home Range Analysis</h1>
+      <span class="sp-spacer"></span>
+      <a class="sp-link" href="https://spatchat.org/browse" target="_blank" rel="noopener">All rooms</a>
+      <a class="sp-link sp-gated" href="/account">Account</a>
       <div class="spatchat-title-actions">
-      <button id="spatchat-theme-btn" type="button" onclick="window.spatchatToggleTheme && window.spatchatToggleTheme()">
-        <span class="spatchat-theme-light">Dark mode</span><span class="spatchat-theme-dark">Light mode</span>
-      </button>
-      <button id="spatchat-share-btn" onclick="
-        navigator.clipboard.writeText('https://spatchat.org/browse/?room=move');
-        this.textContent = 'Link copied';
-        setTimeout(() => { this.textContent = 'Share'; }, 1500);
-      ">Share</button>
+        <button id="spatchat-theme-btn" type="button" onclick="window.spatchatToggleTheme && window.spatchatToggleTheme()">
+          <span class="spatchat-theme-light">Dark mode</span><span class="spatchat-theme-dark">Light mode</span>
+        </button>
+        <button id="spatchat-share-btn" type="button" onclick="
+          navigator.clipboard.writeText('https://spatchat.org/browse/?room=move');
+          this.textContent = 'Link copied';
+          setTimeout(() => {{ this.textContent = 'Share'; }}, 1500);
+        ">Share</button>
       </div>
     </div>
     """)
