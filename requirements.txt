@@ -2,7 +2,7 @@ gradio==6.13.0
 pandas
 folium
 pyproj
-together
+together>=1.2,<2
 huggingface_hub
 python-dotenv
 scipy
