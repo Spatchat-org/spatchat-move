@@ -4093,10 +4093,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-topbar .sp-gated { display: none; }
     body.spatchat-gated #spatchat-topbar .sp-gated { display: inline-block; }
     #spatchat-topbar .spatchat-title-actions { display: flex; gap: 8px; align-items: center; }
-    body.spatchat-embedded #spatchat-topbar { background: transparent; border: none; box-shadow: none; padding-left: 2px; }
-    body.spatchat-embedded #spatchat-topbar .sp-brand, body.spatchat-embedded #spatchat-topbar .sp-link { display: none !important; }
     body #spatchat-workarea { height: calc(100vh - 96px) !important; min-height: 520px; }
-    body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 84px) !important; }
+    body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 96px) !important; }
 
     body.spatchat-embedded #spatchat-header-row { display: none !important; }
     body.spatchat-embedded .gradio-container .main { padding-top: 0 !important; }
@@ -4112,10 +4110,10 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     """)
     gr.HTML(f"""
     <div id="spatchat-topbar">
-      <a class="sp-brand" href="https://spatchat.org/" target="_blank" rel="noopener" title="SpatChat home">{_LOGO_HTML}</a>
+      <a class="sp-brand" href="https://spatchat.org/" target="_top" rel="noopener" title="SpatChat home">{_LOGO_HTML}</a>
       <h1 class="sp-room">Animal Movement and Home Range Analysis</h1>
       <span class="sp-spacer"></span>
-      <a class="sp-link" href="https://spatchat.org/browse" target="_blank" rel="noopener">All rooms</a>
+      <a class="sp-link" href="https://spatchat.org/browse" target="_top" rel="noopener">All rooms</a>
       <a class="sp-link sp-gated" href="/account">Account</a>
       <div class="spatchat-title-actions">
         <button id="spatchat-theme-btn" type="button" onclick="window.spatchatToggleTheme && window.spatchatToggleTheme()">
