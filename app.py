@@ -4097,7 +4097,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-topbar .sp-gated { display: none; }
     body.spatchat-gated #spatchat-topbar .sp-gated { display: inline-block; }
     #spatchat-topbar .spatchat-title-actions { display: flex; gap: 8px; align-items: center; }
-    body #spatchat-workarea { height: calc(100vh - 96px) !important; min-height: 520px; }
+    /* 210px = top bar above the work area + footer below it, so the page fits the window with no page scroll */
+    body #spatchat-workarea { height: calc(100vh - 210px) !important; min-height: 520px; }
     body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 96px) !important; }
 
     body.spatchat-embedded #spatchat-header-row { display: none !important; }
