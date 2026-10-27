@@ -1223,9 +1223,11 @@ _EMPTY_DATA_HTML = (
 
 
 def _datasheet_df_updates(df):
+    # The empty-state is swapped by value, not hidden: visible=False on a gr.HTML was ignored in the
+    # browser, leaving "No data loaded" stacked above the table.
     if df is None:
-        return gr.update(value=None, visible=False), gr.update(visible=True)
-    return gr.update(value=df.head(_DATASHEET_MAX_ROWS), visible=True), gr.update(visible=False)
+        return gr.update(value=None, visible=False), gr.update(value=_EMPTY_DATA_HTML, visible=True)
+    return gr.update(value=df.head(_DATASHEET_MAX_ROWS), visible=True), gr.update(value="", visible=True)
 
 
 def _datasheet_update(session_id):
@@ -3796,6 +3798,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     }
     #spatchat-tabs button[role="tab"].selected { color: var(--spatchat-accent) !important; border-color: var(--spatchat-accent) !important; }
     #spatchat-datasheet { height: 100%; }
+    #spatchat-data-pane .block:has(.prose:empty) { display: none !important; }
     #spatchat-tabs .tabitem { padding: 0 !important; margin-top: 4px; }
     #spatchat-tabs .tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane) { background: transparent !important; overflow: hidden !important; }
     #spatchat-tabs .tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane) > .column,
