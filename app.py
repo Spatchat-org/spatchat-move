@@ -4099,7 +4099,9 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-topbar .spatchat-title-actions { display: flex; gap: 8px; align-items: center; }
     /* 210px = top bar above the work area + footer below it, so the page fits the window with no page scroll */
     body #spatchat-workarea { height: calc(100vh - 210px) !important; min-height: 520px; }
-    body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 186px) !important; }
+    /* Embedded (Hugging Face resizes the iframe to fit the content): never size from viewport height, or each resize feeds the next and the page grows without limit. */
+    body.spatchat-embedded #spatchat-workarea { height: 680px !important; min-height: 0 !important; }
+    html.spatchat-embedded, body.spatchat-embedded, body.spatchat-embedded gradio-app, body.spatchat-embedded .gradio-container { min-height: 0 !important; }
 
     body.spatchat-embedded #spatchat-header-row { display: none !important; }
     body.spatchat-embedded .gradio-container .main { padding-top: 0 !important; }
