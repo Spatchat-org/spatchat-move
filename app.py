@@ -1213,6 +1213,8 @@ _DATA_TAB_RE = re.compile(
 )
 
 
+_PLOT_TAB_RE = re.compile(r"\b(plots?|figures?|charts?|graphs?|histograms?|variograms?)\b", re.IGNORECASE)
+
 _EMPTY_DATA_HTML = (
     '<div class="spatchat-empty-state"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
     'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/>'
@@ -1222,12 +1224,29 @@ _EMPTY_DATA_HTML = (
 )
 
 
+def _datasheet_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """First rows of df with only plain numbers/strings, so the browser table can always render it."""
+    out = df.head(_DATASHEET_MAX_ROWS).copy()
+    try:
+        out.columns = [str(c) for c in out.columns]
+        out = out.replace([np.inf, -np.inf], np.nan)
+        for col in out.columns:
+            s = out[col]
+            if s.dtype == object or not pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+                out[col] = s.astype(str).where(s.notna(), "")
+        return out
+    except Exception:
+        return df.head(_DATASHEET_MAX_ROWS).astype(str)
+
+
 def _datasheet_df_updates(df):
-    # The empty-state is swapped by value, not hidden: visible=False on a gr.HTML was ignored in the
-    # browser, leaving "No data loaded" stacked above the table.
+    # Neither component is shown/hidden through `visible`: toggling a gr.Dataframe from hidden to visible
+    # crashed the Datasheet tab, and a hidden gr.HTML was ignored (leaving "No data loaded" above the
+    # table). The table is always rendered; the empty-state text is swapped by value, and CSS hides the
+    # table while that text is present.
     if df is None:
-        return gr.update(value=None, visible=False), gr.update(value=_EMPTY_DATA_HTML, visible=True)
-    return gr.update(value=df.head(_DATASHEET_MAX_ROWS), visible=True), gr.update(value="", visible=True)
+        return gr.update(value=None), gr.update(value=_EMPTY_DATA_HTML)
+    return gr.update(value=_datasheet_safe(df)), gr.update(value="")
 
 
 def _datasheet_update(session_id):
@@ -1386,19 +1405,29 @@ def _is_skip(value) -> bool:
 def _handle_chat_ui(chat_history, user_message, session_id, figure_state):
     active_session_id = _activate_session(session_id)
     baseline_figures = _render_figure_viewer(figure_state)
-    next_tab = "data" if _DATA_TAB_RE.search(str(user_message or "")) else None
+    asked_for_data = bool(_DATA_TAB_RE.search(str(user_message or "")))
+    asked_for_plots = bool(_PLOT_TAB_RE.search(str(user_message or "")))
+    next_tab = "data" if asked_for_data else None
+    map_updated = False
+    plots_updated = False
     for update in handle_chat(chat_history, user_message, active_session_id, figure_state):
         if isinstance(update, (tuple, list)):
             update = tuple(update)
             figs = update[4] if len(update) > 4 else None
             figs_html = figs.get("value") if isinstance(figs, dict) else figs
             if isinstance(figs_html, str) and figs_html != baseline_figures:
-                next_tab = "plots"
-            elif next_tab is None and len(update) > 1 and not _is_skip(update[1]):
-                next_tab = "map"
+                plots_updated = True
+            if len(update) > 1 and not _is_skip(update[1]):
+                map_updated = True
             yield (*update, active_session_id)
         else:
             yield update
+    if next_tab is None:
+        # Analyses land on the map by default; Plots only when nothing drew on the map or plots were asked for.
+        if plots_updated and (asked_for_plots or not map_updated):
+            next_tab = "plots"
+        elif map_updated:
+            next_tab = "map"
     if next_tab:
         _NEXT_TAB[active_session_id] = next_tab
 
@@ -3799,6 +3828,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     #spatchat-tabs button[role="tab"].selected { color: var(--spatchat-accent) !important; border-color: var(--spatchat-accent) !important; }
     #spatchat-datasheet { height: 100%; }
     #spatchat-data-pane .block:has(.prose:empty) { display: none !important; }
+    #spatchat-data-pane:has(.spatchat-empty-state) #spatchat-datasheet { display: none !important; }
     #spatchat-tabs .tabitem { padding: 0 !important; margin-top: 4px; }
     #spatchat-tabs .tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane) { background: transparent !important; overflow: hidden !important; }
     #spatchat-tabs .tabitem:not(#spatchat-plots-pane):not(#spatchat-data-pane) > .column,
@@ -4184,7 +4214,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                     figure_output = gr.HTML(value=_render_figure_viewer([]), elem_id="spatchat-figure-layer")
                 with gr.Tab("Datasheet", id="data", elem_id="spatchat-data-pane"):
                     datasheet_empty = gr.HTML(value=_EMPTY_DATA_HTML, visible=True)
-                    datasheet = gr.Dataframe(label=f"Data (first {_DATASHEET_MAX_ROWS} rows)", interactive=False, wrap=False, visible=False, elem_id="spatchat-datasheet")
+                    datasheet = gr.Dataframe(label=f"Data (first {_DATASHEET_MAX_ROWS} rows)", interactive=False, wrap=False, elem_id="spatchat-datasheet")
     gr.HTML("""
     <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(16,36,26,0.1); font-size: 11px; color: #5c6b63; text-align: center;">
       © 2025 Ho Yi Wan &amp; Logan Hysen &middot; Cite: Wan, H.Y. &amp; Hysen, L. (2025). <i>Spatchat: Animal Movement and Home Range Analysis.</i>
