@@ -4217,7 +4217,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                     datasheet = gr.Dataframe(label=f"Data (first {_DATASHEET_MAX_ROWS} rows)", interactive=False, wrap=False, elem_id="spatchat-datasheet")
     gr.HTML("""
     <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(16,36,26,0.1); font-size: 11px; color: #5c6b63; text-align: center;">
-      © 2025 Ho Yi Wan &amp; Logan Hysen &middot; Cite: Wan, H.Y. &amp; Hysen, L. (2025). <i>Spatchat: Animal Movement and Home Range Analysis.</i>
+      © 2025 Ho Yi Wan, Logan Hysen &amp; Lokesh Lokesh &middot; Cite: Wan, H.Y. &amp; Hysen, L. (2025). <i>Spatchat: Animal Movement and Home Range Analysis.</i>
     </div>
     """)
 
