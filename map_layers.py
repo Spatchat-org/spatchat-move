@@ -32,7 +32,7 @@ from branca.element import MacroElement, Template
 
 # One color per animal, from a fixed palette with no green (the old code drew a random color each time).
 _ANIMAL_PALETTE = [
-    "#2563eb", "#e4572e", "#9b3dbf", "#f2a900", "#0891b2",
+    "#f85088", "#e4572e", "#9b3dbf", "#f2a900", "#0891b2",
     "#d6336c", "#7c4a2d", "#475569", "#4f46e5", "#c2410c",
 ]
 
