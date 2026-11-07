@@ -30,6 +30,17 @@ from branca.element import MacroElement, Template
 # Geometry helper
 # =============================================================================
 
+# One color per animal, from a fixed palette with no green (the old code drew a random color each time).
+_ANIMAL_PALETTE = [
+    "#2563eb", "#e4572e", "#9b3dbf", "#f2a900", "#0891b2",
+    "#d6336c", "#7c4a2d", "#475569", "#4f46e5", "#c2410c",
+]
+
+
+def _animal_colors(animal_ids):
+    return {aid: _ANIMAL_PALETTE[i % len(_ANIMAL_PALETTE)] for i, aid in enumerate(animal_ids)}
+
+
 def _add_polygon_geom(
     layer,
     geom,
@@ -1239,11 +1250,7 @@ def build_preview_map(df):
         else ["sample"]
     )
 
-    color_map = {
-        aid:
-            f"#{random.randint(0, 0xFFFFFF):06x}"
-        for aid in animal_ids
-    }
+    color_map = _animal_colors(animal_ids)
 
     for animal in animal_ids:
 
@@ -2502,11 +2509,7 @@ def build_results_map(
         else ["sample"]
     )
 
-    color_map = {
-        aid:
-            f"#{random.randint(0, 0xFFFFFF):06x}"
-        for aid in animal_ids
-    }
+    color_map = _animal_colors(animal_ids)
 
     # -------------------------------------------------------------------------
     # Points and tracks
