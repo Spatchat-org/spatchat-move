@@ -991,6 +991,10 @@ def _stash_earlier_outputs(session_id):
         has_files = any(files for _, _, files in os.walk(out))
     except OSError:
         has_files = False
+    registry = os.path.join(SESSIONS_ROOT, session_id, ".provenance.json")
+    if has_files:  # make sure every result is stamped with the dataset it came from before it is moved aside
+        sfiles.stamp_sources(sfiles.scan(out, sfiles.PRODUCED), registry,
+                             os.path.basename(_ACTIVE_FILE.get(session_id, "")))
     if has_files:
         dest = os.path.join(SESSIONS_ROOT, session_id, "earlier_outputs", time.strftime("%H%M%S"))
         n = 2
@@ -998,6 +1002,7 @@ def _stash_earlier_outputs(session_id):
             dest = f"{dest}_{n}"
             n += 1
         shutil.copytree(out, dest, ignore=shutil.ignore_patterns("*.zip"))
+        sfiles.carry_sources(out, dest, registry)
 
 
 def _unique_path(folder, name):
@@ -1399,9 +1404,11 @@ def _move_files_entries(session_id):
     def earlier_note(path):
         return "Earlier result" + (f" ({out_note(path)})" if out_note(path) else "")
 
-    return (sfiles.scan(os.path.join(root, "uploads"), sfiles.UPLOADED, note_for=up_note),
-            sfiles.scan(os.path.join(root, "outputs"), sfiles.PRODUCED, note_for=out_note)
-            + sfiles.scan(os.path.join(root, "earlier_outputs"), sfiles.PRODUCED, note_for=earlier_note))
+    uploaded = sfiles.scan(os.path.join(root, "uploads"), sfiles.UPLOADED, note_for=up_note)
+    produced = (sfiles.scan(os.path.join(root, "outputs"), sfiles.PRODUCED, note_for=out_note)
+                + sfiles.scan(os.path.join(root, "earlier_outputs"), sfiles.PRODUCED, note_for=earlier_note))
+    sfiles.stamp_sources(produced, os.path.join(root, ".provenance.json"), os.path.basename(active))
+    return uploaded, produced
 
 
 def _move_files_views(session_id, open_active=False):
