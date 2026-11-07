@@ -51,6 +51,7 @@ from crs_utils import parse_crs_input
 from map_utils import render_empty_map
 from coords_utils import looks_like_latlon, looks_invalid_latlon, parse_levels_from_text
 from map_layers import build_preview_map, build_results_map
+import spatchat_files as sfiles
 from schema_detect import (
     detect_and_standardize,
     parse_metadata_command,
@@ -296,6 +297,7 @@ _PENDING_QUESTION_DEFAULTS = {
 }
 _PENDING_BY_SESSION: dict[str, dict[str, bool]] = {}
 _LAST_DATA_SESSION_ID: str | None = None
+_ACTIVE_FILE: dict[str, str] = {}  # session id -> path of the uploaded file behind the current dataset
 _GRADIO_SESSION_MAP: dict[str, str] = {}
 
 
@@ -989,6 +991,7 @@ def handle_upload_initial(file, session_id):
     os.makedirs(upload_dir, exist_ok=True)
     filename = os.path.join(upload_dir, os.path.basename(file))
     shutil.copy(file, filename)
+    _ACTIVE_FILE[session_id] = os.path.abspath(filename)
 
     try:
         df = pd.read_csv(filename)
@@ -1264,7 +1267,7 @@ def _dataset_selector_update(library: dict):
     return gr.update(
         choices=[(it["name"], it["id"]) for it in items],
         value=library.get("active"),
-        visible=bool(items),
+        visible=False,  # no dataset dropdown: the map legend shows and toggles what is on the map
     )
 
 
@@ -1340,6 +1343,80 @@ def _switch_dataset(selected_id, library, session_id, chat_history):
         _select_tab("map"),
         library,
     )
+
+
+def _move_files_entries(session_id):
+    """(uploaded, produced) file entries for the Files tab."""
+    sid = _activate_session(session_id)
+    root = os.path.join(SESSIONS_ROOT, sid)
+    active = _ACTIVE_FILE.get(sid, "")
+
+    def up_note(path):
+        return "Movement data" + (" (active)" if os.path.abspath(path) == active else "")
+
+    def out_note(path):
+        low = path.lower()
+        if low.endswith(".zip"):
+            return "Results bundle"
+        if low.endswith((".geojson", ".json")):
+            return "Spatial layer"
+        if low.endswith(".tif"):
+            return "Raster"
+        return {".png": "Plot", ".csv": "Table"}.get(os.path.splitext(low)[1], "")
+
+    return (sfiles.scan(os.path.join(root, "uploads"), sfiles.UPLOADED, note_for=up_note),
+            sfiles.scan(os.path.join(root, "outputs"), sfiles.PRODUCED, note_for=out_note))
+
+
+def _move_files_views(session_id, open_active=False):
+    uploaded, produced = _move_files_entries(session_id)
+    sid = _activate_session(session_id)
+    active = _ACTIVE_FILE.get(sid)
+    return files_panel.updates(gr, uploaded, produced,
+                               preview_path=active if (open_active and active and os.path.isfile(active)) else None)
+
+
+def _move_files_views_open(session_id):
+    return _move_files_views(session_id, open_active=True)
+
+
+def _move_files_remove(rows, paths, chat_history, session_id, library):
+    """Delete the ticked files. Removing the dataset's file unloads the dataset (and its cached copy)."""
+    sid = _activate_session(session_id)
+    root = os.path.join(SESSIONS_ROOT, sid)
+    removed, problems = sfiles.remove_paths(files_panel.ticked(rows, paths), [root])
+    gone = {os.path.abspath(p) for p in removed}
+    chat = list(chat_history or [])
+    library = dict(library or _new_library())
+    map_html = fig_html = fig_state = sheet = sheet_empty = download = gr.skip()
+    selector = gr.skip()
+    if gone and _ACTIVE_FILE.get(sid) and os.path.abspath(_ACTIVE_FILE[sid]) in gone:
+        df = get_cached_df()
+        set_cached_df(None)
+        set_cached_headers([])
+        _ACTIVE_FILE.pop(sid, None)
+        try:
+            os.remove(_session_dataframe_path(sid))  # or it would be restored on the next message
+        except OSError:
+            pass
+        library["items"] = [it for it in (library.get("items") or []) if it.get("ref") is not df]
+        library["active"] = None
+        selector = _dataset_selector_update(library)
+        clear_all_results()
+        map_html, fig_html, fig_state = render_empty_map(), _render_figure_viewer([]), []
+        sheet, sheet_empty = _datasheet_df_updates(None)
+        download = gr.update(value=None, visible=False)
+        chat.append({"role": "assistant", "content": sfiles.removal_message(removed) + ". No dataset is loaded now."})
+    elif gone:
+        chat.append({"role": "assistant", "content": sfiles.removal_message(removed)})
+    return (*files_panel.updates(gr, *_move_files_entries(sid), message=sfiles.removal_message(removed),
+                                 problems=problems, reset_preview=bool(removed)),
+            chat, map_html, fig_html, fig_state, sheet, sheet_empty, library, selector, download)
+
+
+def _move_files_download(rows, paths, session_id):
+    sid = _activate_session(session_id)
+    return files_panel.download_update(gr, rows, paths, [os.path.join(SESSIONS_ROOT, sid)])
 
 
 def _chip_js(text: str) -> str:
@@ -4212,9 +4289,10 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                     map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False, elem_id="spatchat-map")
                 with gr.Tab("Plots", id="plots", elem_id="spatchat-plots-pane"):
                     figure_output = gr.HTML(value=_render_figure_viewer([]), elem_id="spatchat-figure-layer")
-                with gr.Tab("Datasheet", id="data", elem_id="spatchat-data-pane"):
-                    datasheet_empty = gr.HTML(value=_EMPTY_DATA_HTML, visible=True)
-                    datasheet = gr.Dataframe(label=f"Data (first {_DATASHEET_MAX_ROWS} rows)", interactive=False, wrap=False, elem_id="spatchat-datasheet")
+                files_panel = sfiles.build(gr)
+            with gr.Column(visible=False):  # superseded by the Files tab (a CSV opens there as a datasheet)
+                datasheet_empty = gr.HTML(value=_EMPTY_DATA_HTML, visible=True)
+                datasheet = gr.Dataframe(label=f"Data (first {_DATASHEET_MAX_ROWS} rows)", interactive=False, wrap=False, elem_id="spatchat-datasheet")
     gr.HTML("""
     <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(16,36,26,0.1); font-size: 11px; color: #5c6b63; text-align: center;">
       © 2025 Ho Yi Wan, Logan Hysen &amp; Lokesh Lokesh &middot; Cite: Wan, H.Y. &amp; Hysen, L. (2025). <i>Spatchat: Animal Movement and Home Range Analysis.</i>
@@ -4231,6 +4309,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         lambda f, sid, lib, figs, mh: _register_dataset(f, sid, lib, figs, mh),
         inputs=[file_input, session_state, library_state, figure_state, map_output],
         outputs=[library_state, dataset_selector],
+    ).then(_move_files_views_open, inputs=session_state, outputs=files_panel.outputs, show_progress="hidden"
     ).then(lambda: _select_tab("map"), inputs=None, outputs=main_tabs)
     sample_btn.click(
         fn=_load_sample_data_ui,
@@ -4240,6 +4319,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         lambda sid, lib, figs, mh: _register_dataset("Sample data", sid, lib, figs, mh),
         inputs=[session_state, library_state, figure_state, map_output],
         outputs=[library_state, dataset_selector],
+    ).then(_move_files_views_open, inputs=session_state, outputs=files_panel.outputs, show_progress="hidden"
     ).then(lambda: _select_tab("map"), inputs=None, outputs=main_tabs)
     confirm_btn.click(fn=_confirm_and_hint_ui, inputs=[x_col, y_col, crs_text, chatbot, session_state], outputs=[map_output, chatbot, status_output, session_state]).then(_datasheet_update, inputs=session_state, outputs=[datasheet, datasheet_empty]).then(
         _sync_active_dataset,
@@ -4267,6 +4347,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         }
         """,
     ).then(_datasheet_update, inputs=session_state, outputs=[datasheet, datasheet_empty], show_progress="hidden").then(
+        _move_files_views, inputs=session_state, outputs=files_panel.outputs, show_progress="hidden"
+    ).then(
         _consume_next_tab, inputs=session_state, outputs=main_tabs, show_progress="hidden"
     ).then(
         _sync_active_dataset,
@@ -4274,6 +4356,15 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         outputs=library_state,
         show_progress="hidden",
     )
+    files_panel.refresh_btn.click(_move_files_views, inputs=session_state, outputs=files_panel.outputs)
+    files_panel.remove_btn.click(
+        _move_files_remove,
+        inputs=[*files_panel.selections, chatbot, session_state, library_state],
+        outputs=[*files_panel.outputs, chatbot, map_output, figure_output, figure_state, datasheet, datasheet_empty,
+                 library_state, dataset_selector, download_btn],
+    )
+    files_panel.table.input(_move_files_download, inputs=[*files_panel.selections, session_state],
+                            outputs=files_panel.download_btn, show_progress="hidden")
     for _chip, _label in zip(chip_buttons, _SUGGESTION_CHIPS):
         _chip.click(fn=None, js=_chip_js(_label))
     dataset_selector.input(
