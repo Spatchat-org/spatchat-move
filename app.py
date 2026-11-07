@@ -1386,10 +1386,14 @@ def _move_files_entries(session_id):
         low = path.lower()
         if low.endswith(".zip"):
             return "Results bundle"
-        if low.endswith((".geojson", ".json")):
+        if low.endswith(".geojson"):
             return "Spatial layer"
+        if low.endswith(".json"):
+            return "Settings used"
         if low.endswith(".tif"):
             return "Raster"
+        if low.endswith((".txt", ".py")):
+            return "Reproducible script" if "reproduce" in low or low.endswith(".py.txt") else "Notes"
         return {".png": "Plot", ".csv": "Table"}.get(os.path.splitext(low)[1], "")
 
     def earlier_note(path):
