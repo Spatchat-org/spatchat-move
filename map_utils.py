@@ -353,15 +353,16 @@ def apply_map_control_patches(m):
 
 def render_empty_map():
     m = folium.Map(location=[20, 0], zoom_start=2, control_scale=True, tiles=None)
-    folium.TileLayer("OpenStreetMap").add_to(m)
-    folium.TileLayer("CartoDB positron", attr="CartoDB").add_to(m)
-    folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", attr="OpenTopoMap", name="Topographic").add_to(m)
+    folium.TileLayer("OpenStreetMap", show=False).add_to(m)
+    folium.TileLayer("CartoDB positron", attr="CartoDB", show=False).add_to(m)
+    folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", attr="OpenTopoMap", name="Topographic", show=False).add_to(m)
     from map_layers import BLANK_TILE
-    folium.TileLayer(tiles=BLANK_TILE, attr=" ", name="Blank").add_to(m)
+    folium.TileLayer(tiles=BLANK_TILE, attr=" ", name="Blank", show=False).add_to(m)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri",
         name="Satellite",
+        show=True,
     ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     apply_map_control_patches(m)

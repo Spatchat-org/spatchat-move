@@ -365,7 +365,7 @@ def _base_map(
         name="OpenStreetMap",
         overlay=False,
         control=True,
-        show=True,
+        show=False,
     ).add_to(m)
 
     # -------------------------------------------------------------------------
@@ -396,7 +396,7 @@ def _base_map(
         control=True,
         show=False,
     ).add_to(m)
-    folium.TileLayer(tiles=BLANK_TILE, attr=" ", name="Blank").add_to(m)
+    folium.TileLayer(tiles=BLANK_TILE, attr=" ", name="Blank", show=False).add_to(m)
 
     # -------------------------------------------------------------------------
     # Satellite
@@ -413,7 +413,7 @@ def _base_map(
         name="Satellite",
         overlay=False,
         control=True,
-        show=False,
+        show=True,
     ).add_to(m)
 
     return m
