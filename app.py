@@ -2712,6 +2712,21 @@ window.spatchatInitMapDropzone = function() {
 </script>
 """
 
+_DROP_HINT_HTML = (
+    "<style>"
+    "#spatchat-drop-hint { margin: 6px 2px 0 !important; padding: 0 !important; background: transparent !important; border: none !important; }"
+    "#spatchat-drop-hint .spatchat-drop-hint-inner { display: flex; align-items: center; gap: 8px; padding: 7px 12px;"
+    " border: 1px dashed var(--spatchat-border, #cfd9d2); border-radius: 10px; font-size: 12.5px; line-height: 1.4;"
+    " color: var(--spatchat-text-secondary, #5c6b63); }"
+    "#spatchat-drop-hint svg { flex: 0 0 auto; opacity: .85; }"
+    "</style>"
+    '<div class="spatchat-drop-hint-inner">'
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/></svg>'
+    "<span>Drag &amp; drop a movement CSV anywhere on the right-hand panel, or click <b>+</b> to browse.</span></div>"
+)
+
+
 def _logo_html() -> str:
     import base64
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_small.png")
@@ -4198,6 +4213,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                 )
                 user_input = gr.Textbox(label="", show_label=False, placeholder="Message Spatchat...", lines=1, elem_id="spatchat-user-input", scale=1)
                 send_btn = gr.Button("\u2191", elem_id="spatchat-send-btn", scale=0, min_width=40)
+            gr.HTML(value=_DROP_HINT_HTML, elem_id="spatchat-drop-hint")
             x_col = gr.Dropdown(label="X column", choices=[], visible=False, elem_id="spatchat-x-col")
             y_col = gr.Dropdown(label="Y column", choices=[], visible=False, elem_id="spatchat-y-col")
             crs_text = gr.Text(label="CRS (e.g. '32633', '33N', or 'EPSG:32633')", visible=False, elem_id="spatchat-crs")
