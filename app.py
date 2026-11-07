@@ -983,13 +983,41 @@ def _render_figure_viewer(figures: list[dict] | None, active_index: int = 0) -> 
 # --------------------------------------------------------------------------------------
 # Upload flow
 # --------------------------------------------------------------------------------------
+def _stash_earlier_outputs(session_id):
+    """A new upload resets the analysis state, but the results made so far are the visitor's files:
+    keep them (listed in the Files tab as earlier results) instead of deleting them."""
+    out = get_output_dir()
+    try:
+        has_files = any(files for _, _, files in os.walk(out))
+    except OSError:
+        has_files = False
+    if has_files:
+        dest = os.path.join(SESSIONS_ROOT, session_id, "earlier_outputs", time.strftime("%H%M%S"))
+        n = 2
+        while os.path.exists(dest):
+            dest = f"{dest}_{n}"
+            n += 1
+        shutil.copytree(out, dest, ignore=shutil.ignore_patterns("*.zip"))
+
+
+def _unique_path(folder, name):
+    """folder/name, or folder/name_2, name_3, ... when that is taken, so uploads never overwrite each other."""
+    stem, ext = os.path.splitext(name)
+    path, n = os.path.join(folder, name), 2
+    while os.path.exists(path):
+        path = os.path.join(folder, f"{stem}_{n}{ext}")
+        n += 1
+    return path
+
+
 def handle_upload_initial(file, session_id):
     session_id = _activate_session(session_id)
+    _stash_earlier_outputs(session_id)
     clear_all_results()
 
     upload_dir = os.path.join(SESSIONS_ROOT, session_id, "uploads")
     os.makedirs(upload_dir, exist_ok=True)
-    filename = os.path.join(upload_dir, os.path.basename(file))
+    filename = _unique_path(upload_dir, os.path.basename(file))
     shutil.copy(file, filename)
     _ACTIVE_FILE[session_id] = os.path.abspath(filename)
 
@@ -1352,7 +1380,7 @@ def _move_files_entries(session_id):
     active = _ACTIVE_FILE.get(sid, "")
 
     def up_note(path):
-        return "Movement data" + (" (active)" if os.path.abspath(path) == active else "")
+        return "Movement data" + (" (active)" if os.path.abspath(path) == active else " (earlier upload)")
 
     def out_note(path):
         low = path.lower()
@@ -1364,8 +1392,12 @@ def _move_files_entries(session_id):
             return "Raster"
         return {".png": "Plot", ".csv": "Table"}.get(os.path.splitext(low)[1], "")
 
+    def earlier_note(path):
+        return "Earlier result" + (f" ({out_note(path)})" if out_note(path) else "")
+
     return (sfiles.scan(os.path.join(root, "uploads"), sfiles.UPLOADED, note_for=up_note),
-            sfiles.scan(os.path.join(root, "outputs"), sfiles.PRODUCED, note_for=out_note))
+            sfiles.scan(os.path.join(root, "outputs"), sfiles.PRODUCED, note_for=out_note)
+            + sfiles.scan(os.path.join(root, "earlier_outputs"), sfiles.PRODUCED, note_for=earlier_note))
 
 
 def _move_files_views(session_id, open_active=False):
