@@ -340,13 +340,23 @@ def _cleanup_session_resources(session_id: str | None) -> None:
             _GRADIO_SESSION_MAP.pop(key, None)
 
 
+def _cleanup_if_still_idle(sid: str, closed_at: float) -> None:
+    if _LAST_SEEN.get(sid, 0.0) > closed_at:
+        return  # the visitor came back (the "close" was a dropped connection, not a closed tab)
+    _cleanup_session_resources(sid)
+
+
 def _cleanup_current_browser_session() -> None:
+    """Called when Gradio believes a tab closed. Behind proxies a dropped keep-alive looks the same, so the data
+    is only deleted if nothing touches the session for a while."""
     request_hash = _current_gradio_session_hash()
     if not request_hash:
         return
     sid = _GRADIO_SESSION_MAP.pop(request_hash, None)
     if sid:
-        _cleanup_session_resources(sid)
+        timer = threading.Timer(_UNLOAD_GRACE_SECONDS, _cleanup_if_still_idle, args=(sid, time.time()))
+        timer.daemon = True
+        timer.start()
 
 
 def _prune_stale_sessions(max_age_seconds: int = 60 * 60 * 12) -> None:
@@ -370,8 +380,20 @@ def _pending_questions(session_id: str) -> dict[str, bool]:
     return _PENDING_BY_SESSION[session_id]
 
 
+_LAST_SEEN: dict[str, float] = {}      # session id -> last time a handler touched it
+_UNLOAD_GRACE_SECONDS = 15 * 60       # how long a "closed" tab's data is kept before it is deleted
+
+
 def _activate_session(session_id: str | None) -> str:
-    sid = (session_id or "").strip() or str(uuid.uuid4())
+    sid = (session_id or "").strip()
+    if not sid:
+        # An event can arrive before the new session id has travelled back to the browser (a chip clicked while
+        # "Try sample data" is still running). Use the session this same browser connection already has, rather
+        # than starting a second, empty one.
+        request_hash = _current_gradio_session_hash()
+        sid = _GRADIO_SESSION_MAP.get(request_hash, "") if request_hash else ""
+    sid = sid or str(uuid.uuid4())
+    _LAST_SEEN[sid] = time.time()
     session_root = os.path.join(SESSIONS_ROOT, sid)
     upload_dir = os.path.join(session_root, "uploads")
     output_dir = os.path.join(session_root, "outputs")
@@ -843,6 +865,50 @@ def _csv_table_html(path: str, max_rows: int = 24) -> str | None:
     )
 
 
+def _ensure_area_chart(output_dir: str) -> str | None:
+    """Bar chart of home_range_areas.csv (area per animal, one bar per estimator), rebuilt when the table changes."""
+    csv_path = os.path.join(output_dir, "home_range_areas.csv")
+    png_path = os.path.join(output_dir, "home_range_areas_chart.png")
+    if not os.path.isfile(csv_path):
+        return None
+    try:
+        if os.path.isfile(png_path) and os.path.getmtime(png_path) >= os.path.getmtime(csv_path):
+            return png_path
+        import matplotlib.pyplot as plt
+        from map_layers import _ANIMAL_PALETTE
+
+        df = pd.read_csv(csv_path)
+        if not {"animal_id", "type", "area_km2"}.issubset(df.columns) or df.empty:
+            return None
+        animals = list(dict.fromkeys(df["animal_id"].astype(str)))
+        kinds = list(dict.fromkeys(df["type"].astype(str)))
+        width = 0.8 / max(1, len(kinds))
+        fig, ax = plt.subplots(figsize=(max(5.5, 0.55 * len(animals) * len(kinds) + 3), 4.2))
+        for i, kind in enumerate(kinds):
+            sub = df[df["type"].astype(str) == kind].assign(animal_id=lambda d: d["animal_id"].astype(str)).set_index("animal_id")
+            vals = [float(sub["area_km2"].get(a, float("nan"))) for a in animals]
+            xs = [j - 0.4 + width * (i + 0.5) for j in range(len(animals))]
+            yerr = None
+            if {"ci_low_km2", "ci_high_km2"}.issubset(sub.columns):
+                lo = [vals[j] - float(sub["ci_low_km2"].get(a, float("nan"))) for j, a in enumerate(animals)]
+                hi = [float(sub["ci_high_km2"].get(a, float("nan"))) - vals[j] for j, a in enumerate(animals)]
+                if not all(pd.isna(v) for v in lo + hi):
+                    yerr = [[0 if pd.isna(v) else v for v in lo], [0 if pd.isna(v) else v for v in hi]]
+            ax.bar(xs, vals, width, label=kind, color=_ANIMAL_PALETTE[i % len(_ANIMAL_PALETTE)], yerr=yerr, capsize=3)
+        ax.set_xticks(range(len(animals)))
+        ax.set_xticklabels(animals, rotation=30 if len(animals) > 4 else 0, ha="right" if len(animals) > 4 else "center")
+        ax.set_ylabel("Area (km²)")
+        ax.set_title("Home range area by animal and estimator")
+        ax.legend(frameon=False, fontsize=8)
+        fig.tight_layout()
+        fig.savefig(png_path, dpi=130)
+        plt.close(fig)
+        return png_path
+    except Exception as exc:  # a chart is a bonus: never break the Plots tab over it
+        print("[move] could not draw the home-range chart:", exc)
+        return None
+
+
 def _collect_figure_entries(output_dir: str, akde_data: dict | None = None) -> list[dict]:
     figures = []
     seen_ids = set()
@@ -887,9 +953,10 @@ def _collect_figure_entries(output_dir: str, akde_data: dict | None = None) -> l
     for fig_id, title, subtitle, rel_path_parts in movement_specs:
         add_figure(fig_id, title, subtitle, os.path.join(output_dir, *rel_path_parts))
 
+    add_figure("home-range-chart", "Home Range Areas", "Area per animal and estimator", _ensure_area_chart(output_dir))
     add_table(
         "home-range-areas",
-        "Home Range Areas",
+        "Home Range Areas (table)",
         "Summary table from home_range_areas.csv",
         os.path.join(output_dir, "home_range_areas.csv"),
     )
