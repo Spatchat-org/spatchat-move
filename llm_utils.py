@@ -2,6 +2,7 @@
 import json
 import os
 import random
+import sys
 import time
 from pathlib import Path
 from typing import Iterator
@@ -312,29 +313,20 @@ class UnifiedLLM:
 
     def chat(self, messages, temperature=0.0, max_tokens=256, stream=False):
         del stream
-        if self.together:
-            try:
-                return self._together_chat(messages, temperature=temperature, max_tokens=max_tokens)
-            except Exception:
-                pass
         try:
             return self._hf_chat(messages, max_tokens=max_tokens, temperature=temperature)
-        except Exception:
+        except Exception as hf_err:
+            print(f"[LLM] HF primary failed: {hf_err}", file=sys.stderr)
             if not self.together:
                 raise
-            return self._together_chat(messages, temperature=temperature, max_tokens=max_tokens)
+        return self._together_chat(messages, temperature=temperature, max_tokens=max_tokens)
 
     def stream_chat(self, messages, temperature=0.0, max_tokens=256) -> Iterator[str]:
-        if self.together:
-            try:
-                yield from self._together_chat_stream(messages, temperature=temperature, max_tokens=max_tokens)
-                return
-            except Exception:
-                pass
         try:
             yield from self._hf_chat_stream(messages, max_tokens=max_tokens, temperature=temperature)
             return
-        except Exception:
+        except Exception as hf_err:
+            print(f"[LLM] HF primary failed: {hf_err}", file=sys.stderr)
             if not self.together:
                 raise
         yield from self._together_chat_stream(messages, temperature=temperature, max_tokens=max_tokens)
