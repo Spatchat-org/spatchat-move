@@ -1564,7 +1564,14 @@ def _handle_upload_initial_ui(file, chat_history, session_id, figure_state):
     if too_big:
         next_chat = list(chat_history or []) + [{"role": "assistant", "content": f"That file is too large. Please upload a CSV under {MAX_UPLOAD_MB} MB."}]
         return (next_chat, *([gr.skip()] * 13))
+    started = time.perf_counter()
     result = handle_upload_initial(file, session_id)
+    map_value = result[4] if len(result) > 4 else None
+    print(
+        f"[move upload] {os.path.basename(str(file))}: handler {time.perf_counter() - started:.1f}s, "
+        f"map page {(len(map_value) / 1e6 if isinstance(map_value, str) else 0):.1f} MB",
+        flush=True,
+    )
     empty_figures = []
     next_chat = list(chat_history or [])
     uploaded_chat = list(result[0] or [])
@@ -2134,7 +2141,13 @@ def handle_chat(chat_history, user_message, session_id, figure_state):
 
         if any(movement_requests[k] for k in ("displacement", "step_lengths", "turning_angles", "autocorrelation", "hmm")):
             try:
+                _analysis_started = time.perf_counter()
                 movement_msgs.extend(_run_movement_analyses(df_local, movement_requests, get_output_dir()))
+                print(
+                    f"[move analysis] {', '.join(k for k, v in movement_requests.items() if v)} on {len(df_local):,} fixes "
+                    f"took {time.perf_counter() - _analysis_started:.1f}s",
+                    flush=True,
+                )
                 _merge_repro_manifest([], [], None, [], None, False, None, [], None, movement_requests)
                 results_exist = True
             except Exception as exc:

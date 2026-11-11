@@ -3,7 +3,6 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.special import logsumexp
 from sklearn.cluster import KMeans
 
 from ._shared import build_track_metrics, ensure_output_dir
@@ -54,6 +53,30 @@ class GaussianHMMDiag:
             )
         return out
 
+    @staticmethod
+    def _forward_backward(start: np.ndarray, trans: np.ndarray, b: np.ndarray):
+        """Scaled forward-backward pass (Rabiner). `b` holds per-row-rescaled emission probabilities.
+
+        Returns (alpha, beta, c): normalised forward/backward variables and the per-step scale factors.
+        Plain numpy products replace the per-step scipy.special.logsumexp calls, which dominated the run time.
+        """
+        n, k = b.shape
+        alpha = np.empty((n, k), dtype=float)
+        c = np.empty(n, dtype=float)
+        a = start * b[0]
+        c[0] = a.sum()
+        alpha[0] = a / c[0]
+        for t in range(1, n):
+            a = (alpha[t - 1] @ trans) * b[t]
+            s = a.sum()
+            c[t] = s
+            alpha[t] = a / s
+        beta = np.empty((n, k), dtype=float)
+        beta[-1] = 1.0
+        for t in range(n - 2, -1, -1):
+            beta[t] = (trans @ (b[t + 1] * beta[t + 1])) / c[t + 1]
+        return alpha, beta, c
+
     def fit(self, x: np.ndarray):
         x = np.asarray(x, dtype=float)
         if x.ndim != 2 or x.shape[0] < self.n_states + 2:
@@ -63,32 +86,18 @@ class GaussianHMMDiag:
         prev_ll = None
         for _ in range(self.n_iter):
             log_b = self._emission_log_prob(x)
-            log_start = np.log(np.maximum(self.startprob_, 1e-12))
-            log_trans = np.log(np.maximum(self.transmat_, 1e-12))
+            shift = log_b.max(axis=1)
+            b = np.exp(log_b - shift[:, None])
+            start = np.maximum(self.startprob_, 1e-12)
+            trans = np.maximum(self.transmat_, 1e-12)
 
-            log_alpha = np.empty_like(log_b)
-            log_alpha[0] = log_start + log_b[0]
-            for t in range(1, x.shape[0]):
-                log_alpha[t] = log_b[t] + logsumexp(log_alpha[t - 1][:, None] + log_trans, axis=0)
+            alpha, beta, c = self._forward_backward(start, trans, b)
+            log_likelihood = float(np.log(c).sum() + shift.sum())
 
-            log_beta = np.zeros_like(log_b)
-            for t in range(x.shape[0] - 2, -1, -1):
-                log_beta[t] = logsumexp(log_trans + log_b[t + 1][None, :] + log_beta[t + 1][None, :], axis=1)
-
-            log_likelihood = float(logsumexp(log_alpha[-1]))
-            log_gamma = log_alpha + log_beta - log_likelihood
-            gamma = np.exp(log_gamma)
-
-            xi_sum = np.zeros((self.n_states, self.n_states), dtype=float)
-            for t in range(x.shape[0] - 1):
-                log_xi_t = (
-                    log_alpha[t][:, None]
-                    + log_trans
-                    + log_b[t + 1][None, :]
-                    + log_beta[t + 1][None, :]
-                    - log_likelihood
-                )
-                xi_sum += np.exp(log_xi_t)
+            gamma = alpha * beta
+            gamma /= gamma.sum(axis=1, keepdims=True)
+            # xi_t(i, j) = alpha_t(i) * A_ij * b_{t+1}(j) * beta_{t+1}(j) / c_{t+1}, summed over t in one product
+            xi_sum = trans * (alpha[:-1].T @ (b[1:] * beta[1:] / c[1:, None]))
 
             self.startprob_ = gamma[0] / np.sum(gamma[0])
             self.transmat_ = xi_sum / np.maximum(xi_sum.sum(axis=1, keepdims=True), 1e-12)
@@ -99,6 +108,7 @@ class GaussianHMMDiag:
                 diff = x - self.means_[state]
                 self.vars_[state] = ((gamma[:, state][:, None] * diff * diff).sum(axis=0) / gamma_sum[state]) + 1e-3
 
+            self.log_likelihood_ = log_likelihood
             if prev_ll is not None and abs(log_likelihood - prev_ll) < self.tol:
                 break
             prev_ll = log_likelihood
