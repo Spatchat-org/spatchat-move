@@ -155,7 +155,7 @@ class UnifiedLLM:
         tries, delay, last = 3, 2.5, None
         for attempt in range(tries):
             try:
-                if self.hf_chat_enabled and hasattr(self.hf, "chat_completion"):
+                if hasattr(self.hf, "chat_completion"):
                     resp = self.hf.chat_completion(
                         messages=messages,
                         max_tokens=max_tokens,
@@ -202,7 +202,7 @@ class UnifiedLLM:
                     yield str(token)
             return
 
-        if self.hf_chat_enabled and hasattr(self.hf, "chat_completion"):
+        if hasattr(self.hf, "chat_completion"):
             resp = self.hf.chat_completion(
                 messages=messages,
                 max_tokens=max_tokens,
