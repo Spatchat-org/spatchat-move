@@ -4334,7 +4334,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     """)
     gr.HTML(f"""
     <div id="spatchat-topbar">
-      <a class="sp-brand" href="https://spatchat.org/" target="_top" rel="noopener" title="SpatChat home">{_LOGO_HTML}</a>
+      <a class="sp-brand" href="https://spatchat.org/browse" target="_top" rel="noopener" title="SpatChat rooms">{_LOGO_HTML}</a>
       <h1 class="sp-room">Animal Movement and Home Range Analysis</h1>
       <span class="sp-spacer"></span>
       <a class="sp-link" href="https://spatchat.org/browse" target="_top" rel="noopener">All rooms</a>
