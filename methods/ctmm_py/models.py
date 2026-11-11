@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import os
+import threading
+from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any
 
@@ -889,55 +891,118 @@ def _langevin2_components(dt, tau: list[float]):
     return g00, g01, g10, g11, s00, s01, s11, omega2
 
 
-def _innovations_ouf_scalar(x: np.ndarray, t: np.ndarray, tau: list[float], error_var: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    x = np.asarray(x, dtype=float)
-    t = np.asarray(t, dtype=float)
-    n = x.size
+_KALMAN2_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_KALMAN2_CACHE_MAX = 4
+_KALMAN2_LOCK = threading.Lock()
+
+
+def _sanitize_error_var(error_var: np.ndarray | None, n: int) -> np.ndarray:
     if error_var is None:
+        return np.zeros(n, dtype=float)
+    errv = np.asarray(error_var, dtype=float).reshape(-1)
+    if errv.size != n:
         errv = np.zeros(n, dtype=float)
-    else:
-        errv = np.asarray(error_var, dtype=float).reshape(-1)
-        if errv.size != n:
-            errv = np.zeros(n, dtype=float)
-        errv = np.maximum(np.nan_to_num(errv, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
-    dt = np.diff(t)
-    g00, g01, g10, g11, s00, s01, s11, omega2 = _langevin2_components(dt, tau)
-    state0 = 0.0
-    state1 = 0.0
+    return np.maximum(np.nan_to_num(errv, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+
+
+def _kalman2_prepare(components, errv: np.ndarray):
+    """Everything about the 2-state filter that does not depend on the data.
+
+    The covariance recursion (innovation variances and Kalman gains) is identical for every data column that is
+    filtered with the same times, parameters and measurement error, and a fit filters many columns per objective
+    evaluation (ones, each design column, x, y). It is computed once here with exactly the same arithmetic, in the
+    same order, as before, so results are bit-for-bit unchanged. The per-step products of the transition matrix are
+    precomputed with numpy (elementwise IEEE multiplies) and the loop runs on plain Python floats.
+    """
+    g00, g01, g10, g11, s00, s01, s11, omega2 = components
+    n = errv.size
+    a1 = (g00 * g00).tolist()
+    a2 = ((2.0 * g00) * g01).tolist()
+    a3 = (g01 * g01).tolist()
+    b1 = (g00 * g10).tolist()
+    b2 = (g00 * g11 + g01 * g10).tolist()
+    b3 = (g01 * g11).tolist()
+    c1 = (g10 * g10).tolist()
+    c2 = ((2.0 * g10) * g11).tolist()
+    c3 = (g11 * g11).tolist()
+    s00l, s01l, s11l = s00.tolist(), s01.tolist(), s11.tolist()
+    errl = errv.tolist()
+    tiny = float(np.finfo(float).tiny)
+    qs = [0.0] * n
+    k0 = [0.0] * n
+    k1 = [0.0] * n
     cov00 = 1.0
     cov01 = 0.0
-    cov11 = omega2
-    err = np.empty(n, dtype=float)
-    var = np.empty(n, dtype=float)
-    tiny = np.finfo(float).tiny
+    cov11 = float(omega2)
     for i in range(n):
-        qi = float(cov00 + errv[i])
+        qi = cov00 + errl[i]
         if qi < tiny:
             qi = tiny
-        ei = float(x[i] - state0)
         gain0 = cov00 / qi
         gain1 = cov01 / qi
-        state0 = state0 + gain0 * ei
-        state1 = state1 + gain1 * ei
+        qs[i] = qi
+        k0[i] = gain0
+        k1[i] = gain1
         cov00_old = cov00
         cov01_old = cov01
         cov11_old = cov11
         cov00 = cov00_old - gain0 * cov00_old
         cov01 = cov01_old - gain0 * cov01_old
         cov11 = cov11_old - gain1 * cov01_old
+        if i < n - 1:
+            cov00, cov01, cov11 = (
+                a1[i] * cov00 + a2[i] * cov01 + a3[i] * cov11 + s00l[i],
+                b1[i] * cov00 + b2[i] * cov01 + b3[i] * cov11 + s01l[i],
+                c1[i] * cov00 + c2[i] * cov01 + c3[i] * cov11 + s11l[i],
+            )
+    return (
+        np.array(qs, dtype=float),
+        k0,
+        k1,
+        g00.tolist(),
+        g01.tolist(),
+        g10.tolist(),
+        g11.tolist(),
+    )
+
+
+def _kalman2_innovations(x: np.ndarray, t: np.ndarray, errv: np.ndarray, tag: tuple, components_fn):
+    n = x.size
+    key = (tag, n, t.tobytes(), errv.tobytes())
+    with _KALMAN2_LOCK:
+        prepared = _KALMAN2_CACHE.get(key)
+        if prepared is not None:
+            _KALMAN2_CACHE.move_to_end(key)
+    if prepared is None:
+        prepared = _kalman2_prepare(components_fn(np.diff(t)), errv)
+        with _KALMAN2_LOCK:
+            _KALMAN2_CACHE[key] = prepared
+            while len(_KALMAN2_CACHE) > _KALMAN2_CACHE_MAX:
+                _KALMAN2_CACHE.popitem(last=False)
+    qs, k0, k1, g00, g01, g10, g11 = prepared
+    xl = x.tolist()
+    err = [0.0] * n
+    state0 = 0.0
+    state1 = 0.0
+    for i in range(n):
+        ei = xl[i] - state0
         err[i] = ei
-        var[i] = qi
+        state0 = state0 + k0[i] * ei
+        state1 = state1 + k1[i] * ei
         if i < n - 1:
             state0, state1 = (
                 g00[i] * state0 + g01[i] * state1,
                 g10[i] * state0 + g11[i] * state1,
             )
-            cov00, cov01, cov11 = (
-                g00[i] * g00[i] * cov00 + 2.0 * g00[i] * g01[i] * cov01 + g01[i] * g01[i] * cov11 + s00[i],
-                g00[i] * g10[i] * cov00 + (g00[i] * g11[i] + g01[i] * g10[i]) * cov01 + g01[i] * g11[i] * cov11 + s01[i],
-                g10[i] * g10[i] * cov00 + 2.0 * g10[i] * g11[i] * cov01 + g11[i] * g11[i] * cov11 + s11[i],
-            )
-    return err, var
+    return np.array(err, dtype=float), qs.copy()
+
+
+def _innovations_ouf_scalar(x: np.ndarray, t: np.ndarray, tau: list[float], error_var: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    x = np.asarray(x, dtype=float)
+    t = np.asarray(t, dtype=float)
+    errv = _sanitize_error_var(error_var, x.size)
+    tau_key = tuple(float(v) for v in tau)
+    return _kalman2_innovations(x, t, errv, ("ouf", tau_key), lambda dt: _langevin2_components(dt, tau))
 
 
 def _fit_ouf_profile(z: np.ndarray, t: np.ndarray, start_tau: list[float], method: str = "pHREML", isotropic: bool = False, design: np.ndarray | None = None, error_var: np.ndarray | None = None) -> tuple[list[float], np.ndarray, np.ndarray, float] | None:
@@ -1224,49 +1289,10 @@ def _ouomega_components(dt, tau: float, omega: float):
 def _innovations_ouomega_scalar(x: np.ndarray, t: np.ndarray, tau: float, omega: float, error_var: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     x = np.asarray(x, dtype=float)
     t = np.asarray(t, dtype=float)
-    n = x.size
-    if error_var is None:
-        errv = np.zeros(n, dtype=float)
-    else:
-        errv = np.asarray(error_var, dtype=float).reshape(-1)
-        if errv.size != n:
-            errv = np.zeros(n, dtype=float)
-        errv = np.maximum(np.nan_to_num(errv, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
-    dt = np.diff(t)
-    g00, g01, g10, g11, s00, s01, s11, omega2 = _ouomega_components(dt, tau, omega)
-    state0 = 0.0
-    state1 = 0.0
-    cov00 = 1.0
-    cov01 = 0.0
-    cov11 = omega2
-    err = np.empty(n, dtype=float)
-    var = np.empty(n, dtype=float)
-    for i in range(n):
-        qi = max(float(cov00 + errv[i]), np.finfo(float).tiny)
-        ei = float(x[i] - state0)
-        gain0 = cov00 / qi
-        gain1 = cov01 / qi
-        state0 = state0 + gain0 * ei
-        state1 = state1 + gain1 * ei
-        cov00_old = cov00
-        cov01_old = cov01
-        cov11_old = cov11
-        cov00 = cov00_old - gain0 * cov00_old
-        cov01 = cov01_old - gain0 * cov01_old
-        cov11 = cov11_old - gain1 * cov01_old
-        err[i] = ei
-        var[i] = qi
-        if i < n - 1:
-            state0, state1 = (
-                g00[i] * state0 + g01[i] * state1,
-                g10[i] * state0 + g11[i] * state1,
-            )
-            cov00, cov01, cov11 = (
-                g00[i] * g00[i] * cov00 + 2.0 * g00[i] * g01[i] * cov01 + g01[i] * g01[i] * cov11 + s00[i],
-                g00[i] * g10[i] * cov00 + (g00[i] * g11[i] + g01[i] * g10[i]) * cov01 + g01[i] * g11[i] * cov11 + s01[i],
-                g10[i] * g10[i] * cov00 + 2.0 * g10[i] * g11[i] * cov01 + g11[i] * g11[i] * cov11 + s11[i],
-            )
-    return err, var
+    errv = _sanitize_error_var(error_var, x.size)
+    return _kalman2_innovations(
+        x, t, errv, ("ouomega", float(tau), float(omega)), lambda dt: _ouomega_components(dt, tau, omega)
+    )
 
 
 def _fit_ouomega_profile(z: np.ndarray, t: np.ndarray, start_tau: float, start_omega: float, method: str = "pHREML", isotropic: bool = False, design: np.ndarray | None = None, error_var: np.ndarray | None = None) -> tuple[float, float, np.ndarray, np.ndarray, float] | None:
