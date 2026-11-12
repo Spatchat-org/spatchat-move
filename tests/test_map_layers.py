@@ -100,5 +100,57 @@ class AllPointsTests(unittest.TestCase):
         self.assertNotIn("<b>", label)
 
 
+class AnimalIdEscapingTests(unittest.TestCase):
+    """Animal IDs come from the user's CSV and end up in popups, layer names and tooltips, which Leaflet inserts as HTML."""
+
+    EVIL = "</script><img src=x onerror=alert(1)>"
+    ESCAPED = "&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;"
+
+    def test_preview_map_escapes_the_id_everywhere(self):
+        page = _page(map_layers.build_preview_map(_track(20, animal=self.EVIL)))
+        self.assertNotIn(self.EVIL, page)
+        self.assertIn(self.ESCAPED, page)
+
+    def test_results_map_escapes_the_id_in_popups_layer_names_and_tooltips(self):
+        import tempfile
+
+        import storage
+        from methods.kde import KDEParams, add_kdes
+        from methods.mcp import add_mcps
+        from schema_detect import detect_and_standardize
+
+        df = pd.read_csv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample_data", "demo_movement.csv"))
+        df, _ = detect_and_standardize(df)
+        df["animal_id"] = "Fox1"  # the analyses write files named after the ID, so run them with a safe one
+        original = storage.get_output_dir
+        storage.get_output_dir = lambda: tempfile.mkdtemp()
+        try:
+            add_mcps(df, [95])
+            add_kdes(df, [95], params=KDEParams())
+            for results in (storage.mcp_results, storage.kde_results):
+                results[self.EVIL] = results.pop("Fox1")  # ... then label them with the hostile ID for the map
+            df["animal_id"] = self.EVIL
+            html = map_layers.build_results_map(
+                df,
+                mcp_results=storage.mcp_results,
+                kde_results=storage.kde_results,
+                requested_percents={95},
+                requested_kde_percents={95},
+            )
+        finally:
+            storage.get_output_dir = original
+            for results in (storage.mcp_results, storage.kde_results):
+                results.clear()
+        page = _page(html)
+        self.assertNotIn(self.EVIL, page)
+        self.assertIn(self.ESCAPED + " MCP 95%", page)          # layer name and popup
+        self.assertIn(self.ESCAPED + " KDE 95% Contour", page)
+
+    def test_ordinary_ids_are_left_exactly_as_they_were(self):
+        self.assertEqual(map_layers._esc("Fox-1"), "Fox-1")
+        self.assertEqual(map_layers._esc("156323"), "156323")
+        self.assertEqual(map_layers._esc(156323), "156323")
+
+
 if __name__ == "__main__":
     unittest.main()

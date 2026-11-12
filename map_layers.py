@@ -37,6 +37,15 @@ _ANIMAL_PALETTE = [
 ]
 
 
+def _esc(value) -> str:
+    """HTML-escape text that comes from the user's CSV (animal IDs) before it goes into a popup, tooltip or layer name.
+    Leaflet inserts these as HTML, so an ID such as "</script>" would otherwise break out of the map. Ordinary IDs
+    are unchanged."""
+    import html as _html
+
+    return _html.escape(str(value))
+
+
 def _animal_colors(animal_ids):
     return {aid: _ANIMAL_PALETTE[i % len(_ANIMAL_PALETTE)] for i, aid in enumerate(animal_ids)}
 
@@ -1345,7 +1354,7 @@ def build_preview_map(df):
                     color=color_map[animal],
                     weight=2.5,
                     opacity=0.8,
-                    popup=str(animal),
+                    popup=_esc(animal),
                 ).add_to(lines_layer)
 
         _add_canvas_points(points_layer, track, animal, color_map[animal], has_timestamp)
@@ -1437,7 +1446,7 @@ def make_points_tracks_layers(
                     color=color,
                     weight=2.5,
                     opacity=0.8,
-                    popup=f"{animal} Track",
+                    popup=f"{_esc(animal)} Track",
                 ).add_to(tracks_layer)
 
         _add_canvas_points(points_layer, track, animal, color, has_timestamp)
@@ -1482,7 +1491,7 @@ def make_mcp_layers(
 
                 layer = folium.FeatureGroup(
                     name=(
-                        f"{animal} "
+                        f"{_esc(animal)} "
                         f"MCP {percent}%"
                     ),
                     show=True,
@@ -1506,7 +1515,7 @@ def make_mcp_layers(
                         )
                     ),
                     popup=(
-                        f"{animal} "
+                        f"{_esc(animal)} "
                         f"MCP {percent}%"
                     ),
                 )
@@ -1579,7 +1588,7 @@ def make_kde_layers(
                 raster_layer = (
                     folium.FeatureGroup(
                         name=(
-                            f"{animal} "
+                            f"{_esc(animal)} "
                             "KDE Raster"
                         ),
                         show=True,
@@ -1638,7 +1647,7 @@ def make_kde_layers(
 
             contour_layer = folium.FeatureGroup(
                 name=(
-                    f"{animal} KDE "
+                    f"{_esc(animal)} KDE "
                     f"{percent}% Contour"
                 ),
                 show=True,
@@ -1659,7 +1668,7 @@ def make_kde_layers(
                     fill=True,
                     fill_opacity=0.2,
                     popup=(
-                        f"{animal} KDE "
+                        f"{_esc(animal)} KDE "
                         f"{percent}% Contour"
                     ),
                 )
@@ -1731,7 +1740,7 @@ def make_akde_layers(
 
                 raster_layer = folium.FeatureGroup(
                     name=(
-                        f"{animal} "
+                        f"{_esc(animal)} "
                         "AKDE Raster"
                     ),
                     show=True,
@@ -1789,7 +1798,7 @@ def make_akde_layers(
 
             contour_layer = folium.FeatureGroup(
                 name=(
-                    f"{animal} AKDE "
+                    f"{_esc(animal)} AKDE "
                     f"{percent}% Contour"
                 ),
                 show=True,
@@ -1827,7 +1836,7 @@ def make_akde_layers(
             ):
 
                 popup = (
-                    f"{animal} AKDE "
+                    f"{_esc(animal)} AKDE "
                     f"{percent}% Contour"
                     f"<br>Area: "
                     f"{area:.2f} km²"
@@ -1839,7 +1848,7 @@ def make_akde_layers(
             else:
 
                 popup = (
-                    f"{animal} AKDE "
+                    f"{_esc(animal)} AKDE "
                     f"{percent}% Contour"
                     f"<br>Area: "
                     f"{area:.2f} km²"
@@ -1875,7 +1884,7 @@ def make_akde_layers(
 
                 ci_layer = folium.FeatureGroup(
                     name=(
-                        f"{animal} AKDE "
+                        f"{_esc(animal)} AKDE "
                         f"{percent}% "
                         "95% CI Contours"
                     ),
@@ -1912,7 +1921,7 @@ def make_akde_layers(
                     )
 
                     ci_popup = (
-                        f"{animal} AKDE "
+                        f"{_esc(animal)} AKDE "
                         f"{percent}% 95% CI "
                         f"{label} contour"
                         f"<br>Area: {area_text}"
@@ -2015,7 +2024,7 @@ def make_locoh_layers(
 
                 "properties": {
                     "animal_id":
-                        str(animal),
+                        _esc(animal),
 
                     "isopleth":
                         iso,
@@ -2033,7 +2042,7 @@ def make_locoh_layers(
 
             layer = folium.FeatureGroup(
                 name=(
-                    f"{animal} "
+                    f"{_esc(animal)} "
                     f"{name_prefix} "
                     f"{iso}%"
                 ),
@@ -2045,7 +2054,7 @@ def make_locoh_layers(
                 name=(
                     f"{name_prefix} "
                     f"{iso}% — "
-                    f"{animal}"
+                    f"{_esc(animal)}"
                 ),
                 style_function=(
                     lambda _feat,
@@ -2199,7 +2208,7 @@ def make_locoh_facets_layers(
 
                     "properties": {
                         "animal_id":
-                            str(animal),
+                            _esc(animal),
 
                         "cum_percent":
                             pct,
@@ -2233,7 +2242,7 @@ def make_locoh_facets_layers(
 
         layer = folium.FeatureGroup(
             name=(
-                f"{animal} "
+                f"{_esc(animal)} "
                 f"{name_prefix}"
             ),
             show=True,
@@ -2243,7 +2252,7 @@ def make_locoh_facets_layers(
             data=fc,
             name=(
                 f"{name_prefix} — "
-                f"{animal}"
+                f"{_esc(animal)}"
             ),
             style_function=(
                 lambda feat:
@@ -2370,7 +2379,7 @@ def make_dbbmm_layers(
 
             raster_layer = folium.FeatureGroup(
                 name=(
-                    f"{animal} "
+                    f"{_esc(animal)} "
                     f"{name_prefix} Raster"
                 ),
                 show=True,
@@ -2439,7 +2448,7 @@ def make_dbbmm_layers(
 
             layer = folium.FeatureGroup(
                 name=(
-                    f"{animal} "
+                    f"{_esc(animal)} "
                     f"{name_prefix} "
                     f"{percent}%"
                 ),
@@ -2455,7 +2464,7 @@ def make_dbbmm_layers(
 
                         "properties": {
                             "animal_id":
-                                str(animal),
+                                _esc(animal),
 
                             "percent":
                                 percent,
