@@ -1,5 +1,22 @@
 # app.py
 import os
+# Structured logging: the shared module comes from the gateway (skipped when this room runs on its own).
+try:
+    import spatchat_log
+
+    spatchat_log.setup("move")
+except Exception:
+    pass
+
+import logging
+
+try:
+    from spatchat_log import swallowed as _swallowed
+except Exception:  # shared module not available: still record the problem with plain logging
+
+    def _swallowed(where, level=logging.WARNING):
+        logging.getLogger("spatchat.swallowed").log(level, "ignored error in %s", where, exc_info=True)
+
 import json
 import re
 import time
@@ -516,15 +533,15 @@ def _reset_session_state():
     try:
         clear_all_results()
     except Exception:
-        pass
+        _swallowed("move.app:_reset_session_state (clear_all_results)")
     try:
         set_cached_df(None)
     except Exception:
-        pass
+        _swallowed("move.app:_reset_session_state (set_cached_df)")
     try:
         set_cached_headers([])
     except Exception:
-        pass
+        _swallowed("move.app:_reset_session_state (set_cached_headers)")
 
 # --- detect "parameter question" (no levels, no key=val, no action verb) ------------
 _PARAM_VERBS = ("run", "compute", "calculate", "do", "make", "generate", "plot", "draw", "want", "need", "give")
