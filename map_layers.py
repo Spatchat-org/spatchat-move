@@ -1220,22 +1220,66 @@ def _add_grouped_layer_control_patch(
 # Preview map
 # =============================================================================
 
-# One marker (with a popup) per fix makes the map enormous for GPS collars: ~12,000 fixes produced a 17 MB page that
-# took ~16 s to build and froze the browser. The full track line is always drawn; only the point markers are thinned.
-MAX_MAP_POINTS = 1500
+class CanvasPoints(MacroElement):
+    """Every fix of one track as a single canvas layer.
+
+    A folium.CircleMarker per fix (each with its own popup object) turned a 12,000-fix GPS track into a 17 MB page that
+    took minutes to draw. Here all fixes travel as one compact array, are drawn on one canvas, and a single shared popup
+    opens when a point is clicked, so every fix is shown and the page stays small and quick.
+    """
+
+    _template = Template("""
+        {% macro script(this, kwargs) %}
+        (function () {
+            var layer = {{ this._parent.get_name() }};
+            var pts = {{ this.points_json }};
+            var label = {{ this.label_json }};
+            var renderer = L.canvas({padding: 0.5});
+            var style = {
+                radius: {{ this.radius }}, color: {{ this.color_json }}, stroke: false, fill: true,
+                fillColor: {{ this.color_json }}, fillOpacity: {{ this.fill_opacity }}, renderer: renderer
+            };
+            for (var i = 0; i < pts.length; i++) {
+                var marker = L.circleMarker([pts[i][0], pts[i][1]], style);
+                marker._spLabel = pts[i].length > 2 ? label + "<br>" + pts[i][2] : label;
+                layer.addLayer(marker);
+            }
+            layer.on("click", function (e) {
+                if (e.layer && e.layer._spLabel !== undefined && e.layer._map) {
+                    e.layer._map.openPopup(e.layer._spLabel, e.latlng);
+                }
+            });
+        })();
+        {% endmacro %}
+    """)
+
+    def __init__(self, points, label, color, radius=4, fill_opacity=0.7):
+        import html as _html
+        import json as _json
+
+        super().__init__()
+        self._name = "CanvasPoints"
+        self.points_json = _json.dumps(points, separators=(",", ":")).replace("</", "<\\/")
+        self.label_json = _json.dumps(_html.escape(str(label))).replace("</", "<\\/")
+        self.color_json = _json.dumps(str(color))
+        self.radius = int(radius)
+        self.fill_opacity = float(fill_opacity)
 
 
-def _thin_points(track, max_points):
-    """Evenly spaced subset of rows that always keeps the first and last fix."""
-    n = len(track)
-    if n <= max_points or max_points < 2:
-        return track
-    idx = np.unique(np.linspace(0, n - 1, max_points).round().astype(int))
-    return track.iloc[idx]
+def _add_canvas_points(layer, track, animal, color, has_timestamp):
+    """Draw every fix of `track` on `layer`; returns how many were drawn."""
+    import html as _html
 
-
-def _points_budget(n_animals):
-    return max(300, MAX_MAP_POINTS // max(1, n_animals))
+    lat = track["latitude"].to_numpy(dtype=float)
+    lon = track["longitude"].to_numpy(dtype=float)
+    if has_timestamp:
+        stamps = [("" if s in ("None", "NaT", "nan") else _html.escape(s)) for s in track["timestamp"].astype(str).tolist()]
+        points = [[round(float(a), 7), round(float(b), 7), s] if s else [round(float(a), 7), round(float(b), 7)]
+                  for a, b, s in zip(lat, lon, stamps)]
+    else:
+        points = [[round(float(a), 7), round(float(b), 7)] for a, b in zip(lat, lon)]
+    CanvasPoints(points, animal, color).add_to(layer)
+    return len(points)
 
 
 def build_preview_map(df):
@@ -1269,7 +1313,6 @@ def build_preview_map(df):
     )
 
     color_map = _animal_colors(animal_ids)
-    n_shown = 0
 
     for animal in animal_ids:
 
@@ -1305,39 +1348,8 @@ def build_preview_map(df):
                     popup=str(animal),
                 ).add_to(lines_layer)
 
-        shown = _thin_points(track, _points_budget(len(animal_ids)))
-        n_shown += len(shown)
+        _add_canvas_points(points_layer, track, animal, color_map[animal], has_timestamp)
 
-        for _, row in shown.iterrows():
-
-            label = (
-                f"{animal}"
-                +
-                (
-                    f"<br>{row['timestamp']}"
-                    if (
-                        has_timestamp
-                        and row.get("timestamp")
-                        is not None
-                    )
-                    else ""
-                )
-            )
-
-            folium.CircleMarker(
-                location=[
-                    row["latitude"],
-                    row["longitude"],
-                ],
-                radius=3,
-                popup=label,
-                color=color_map[animal],
-                fill=True,
-                fill_opacity=0.7,
-            ).add_to(points_layer)
-
-    if n_shown < len(df):
-        points_layer.layer_name = f"Points (showing {n_shown:,} of {len(df):,})"
     points_layer.add_to(m)
 
     if has_timestamp:
@@ -1389,7 +1401,6 @@ def make_points_tracks_layers(
         else ["sample"]
     )
 
-    n_shown = 0
 
     for animal in animal_ids:
 
@@ -1429,25 +1440,8 @@ def make_points_tracks_layers(
                     popup=f"{animal} Track",
                 ).add_to(tracks_layer)
 
-        shown = _thin_points(track, _points_budget(len(animal_ids)))
-        n_shown += len(shown)
+        _add_canvas_points(points_layer, track, animal, color, has_timestamp)
 
-        for _, row in shown.iterrows():
-
-            folium.CircleMarker(
-                location=[
-                    row["latitude"],
-                    row["longitude"],
-                ],
-                radius=3,
-                color=color,
-                fill=True,
-                fill_opacity=0.7,
-                popup=f"{animal}",
-            ).add_to(points_layer)
-
-    if n_shown < len(df):
-        points_layer.layer_name = f"Points (showing {n_shown:,} of {len(df):,})"
 
     return (
         points_layer,
