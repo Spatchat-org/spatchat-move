@@ -4360,6 +4360,36 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     body.spatchat-embedded:not(.spatchat-dark) .gradio-container .main,
     body.spatchat-embedded:not(.spatchat-dark) #spatchat-workarea, body.spatchat-embedded:not(.spatchat-dark) #spatchat-splitter { background: transparent !important; }
     body.spatchat-dark #spatchat-sidebar, body.spatchat-dark #spatchat-mapcol, body.spatchat-dark #spatchat-workarea, body.spatchat-dark #spatchat-splitter { background: var(--spatchat-connect-bg) !important; }
+
+    /* Mobile: stack chat above map/plots instead of pushing the results panel off-screen. */
+    @media (max-width: 900px) {
+        body #spatchat-workarea {
+            height: auto !important;
+            min-height: 0 !important;
+            overflow-x: hidden !important;
+            overflow-y: visible !important;
+        }
+        body.spatchat-embedded #spatchat-workarea {
+            height: 1080px !important;
+            min-height: 1080px !important;
+        }
+        #spatchat-workarea,
+        #spatchat-workarea > .gradio-row {
+            min-width: 0 !important;
+            height: auto !important;
+            flex-direction: column !important;
+            flex-wrap: nowrap !important;
+            align-items: stretch !important;
+        }
+        #spatchat-sidebar,
+        #spatchat-mapcol {
+            flex: 0 0 520px !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            height: 520px !important;
+            min-height: 520px !important;
+        }
+    }
     </style>
     """)
     gr.HTML(f"""
